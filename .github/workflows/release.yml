@@ -56,7 +56,7 @@ jobs:
         run: |
           tar czf "gateway-${{ steps.meta.outputs.tag }}.tar.gz" \
             --exclude='node_modules' \
-            --exclude='admin/node_modules' \
+            --exclude='admin/node_modules' --warning=no-file-changed \
             --exclude='data' \
             --exclude='.git' \
             .
