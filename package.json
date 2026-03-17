@@ -1,0 +1,14 @@
+{
+  "name": "@restry/clawline-relay-gateway",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Relay gateway for clawdbot clawline",
+  "scripts": {
+    "start": "node server.js",
+    "build:admin": "cd admin && npm run build"
+  },
+  "dependencies": {
+    "ws": "^8.19.0"
+  }
+}

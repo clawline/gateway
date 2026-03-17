@@ -1,0 +1,10 @@
+{
+  email ops@example.com
+}
+
+relay.example.com {
+  encode zstd gzip
+
+  # Relay gateway serves both HTTP pages and WebSocket upgrades.
+  reverse_proxy 127.0.0.1:18080
+}
