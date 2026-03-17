@@ -273,7 +273,7 @@ type AppDialogConfig = {
 
 type AppDialogState = ({ mode: 'alert' | 'confirm' } & AppDialogConfig) | null;
 
-const ADMIN_TOKEN_STORAGE_KEY = 'clawline-admin-token';
+const ADMIN_TOKEN = import.meta.env.VITE_ADMIN_TOKEN ?? '';
 const GATEWAY_NAME = 'CLAWLINE_GATEWAY';
 const GATEWAY_VERSION = 'LIVE';
 
@@ -1070,84 +1070,6 @@ const UserFormModal = ({
   );
 };
 
-const LoginScreen = ({
-  onLogin,
-  initialToken,
-  isAuthenticating,
-  error,
-}: {
-  onLogin: (token: string) => Promise<void>;
-  initialToken: string;
-  isAuthenticating: boolean;
-  error: string | null;
-}) => {
-  const [token, setToken] = useState(initialToken);
-
-  useEffect(() => {
-    setToken(initialToken);
-  }, [initialToken]);
-
-  const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const nextToken = token.trim();
-    if (!nextToken) {
-      return;
-    }
-    await onLogin(nextToken);
-  };
-
-  return (
-    <div className="min-h-screen bg-[#020617] text-cyan-500 font-mono flex items-center justify-center relative overflow-hidden">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,_#083344_0%,_#020617_100%)] opacity-50" />
-      <div className="absolute inset-0 bg-[linear-gradient(rgba(6,182,212,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(6,182,212,0.03)_1px,transparent_1px)] bg-[size:40px_40px] [mask-image:radial-gradient(ellipse_80%_80%_at_50%_50%,#000_20%,transparent_100%)] pointer-events-none" />
-
-      <div className="relative z-10 w-full max-w-md p-8 bg-black/60 border border-cyan-900/50 shadow-[0_0_50px_rgba(6,182,212,0.1)] backdrop-blur-md">
-        <div className="flex flex-col items-center mb-8">
-          <Hexagon className="w-12 h-12 text-cyan-400 mb-4 animate-[spin_10s_linear_infinite]" />
-          <h1 className="text-xl font-bold tracking-widest text-cyan-100">{GATEWAY_NAME}</h1>
-          <p className="text-[10px] text-cyan-600 tracking-widest mt-2">SECURE_UPLINK_REQUIRED</p>
-        </div>
-
-        <form onSubmit={handleLogin} className="space-y-6">
-          <div className="space-y-2">
-            <label className="text-[10px] text-cyan-500 tracking-widest">ADMIN_ACCESS_TOKEN</label>
-            <input
-              type="password"
-              value={token}
-              onChange={(event) => setToken(event.target.value)}
-              className={inputClassName}
-              placeholder="Enter admin token..."
-              disabled={isAuthenticating}
-            />
-          </div>
-
-          {error ? (
-            <div className="border border-rose-900/40 bg-rose-950/20 px-3 py-2 text-xs text-rose-300">{error}</div>
-          ) : null}
-
-          <button
-            type="submit"
-            disabled={isAuthenticating || !token.trim()}
-            className="w-full py-3 bg-cyan-950/50 border border-cyan-700 text-cyan-300 hover:bg-cyan-900 hover:text-cyan-100 transition-all tracking-widest text-xs flex justify-center items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isAuthenticating ? (
-              <>
-                <Activity className="w-4 h-4 animate-spin" />
-                AUTHENTICATING...
-              </>
-            ) : (
-              <>
-                <Lock className="w-4 h-4" />
-                INITIATE_HANDSHAKE
-              </>
-            )}
-          </button>
-        </form>
-      </div>
-    </div>
-  );
-};
-
 function ZapLine() {
   return <Activity className="w-4 h-4" />;
 }
@@ -1202,10 +1124,6 @@ export default function App() {
 }
 
 function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaims | null; onLogtoSignOut: () => void }) {
-  const [authToken, setAuthToken] = useState(() => localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) ?? '');
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isAuthenticating, setIsAuthenticating] = useState(Boolean(localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY)));
-  const [authError, setAuthError] = useState<string | null>(null);
   const [dashboardError, setDashboardError] = useState<string | null>(null);
   const [relayState, setRelayState] = useState<RelayState | null>(null);
   const [time, setTime] = useState(new Date().toISOString());
@@ -1273,38 +1191,19 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
     }
   };
 
-  const refreshState = async (token = authToken, options?: { silent?: boolean; keepAuthError?: boolean }) => {
-    if (!token.trim()) {
-      setIsAuthenticated(false);
-      setRelayState(null);
-      return null;
-    }
-
+  const refreshState = async (options?: { silent?: boolean }) => {
     if (!options?.silent) {
       setIsRefreshing(true);
     }
 
     try {
-      const nextState = await apiFetch<RelayState>('/api/state', token.trim());
+      const nextState = await apiFetch<RelayState>('/api/state', ADMIN_TOKEN);
       setRelayState(nextState);
-      setAuthToken(token.trim());
-      setIsAuthenticated(true);
       setDashboardError(null);
-      if (!options?.keepAuthError) {
-        setAuthError(null);
-      }
-      localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, token.trim());
       return nextState;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'request failed';
-      if (error instanceof ApiError && error.status === 401) {
-        localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
-        setAuthToken('');
-        setRelayState(null);
-        setSelectedChannelId(null);
-        setIsAuthenticated(false);
-        setAuthError(message);
-      } else if (!options?.silent) {
+      if (!options?.silent) {
         setDashboardError(message);
       }
       return null;
@@ -1321,28 +1220,16 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
   }, []);
 
   useEffect(() => {
-    if (!authToken.trim()) {
-      setIsAuthenticating(false);
-      return;
-    }
-
-    void (async () => {
-      await refreshState(authToken, { keepAuthError: true });
-      setIsAuthenticating(false);
-    })();
+    void refreshState();
   }, []);
 
   useEffect(() => {
-    if (!isAuthenticated || !authToken.trim()) {
-      return;
-    }
-
     const intervalId = window.setInterval(() => {
-      void refreshState(authToken, { silent: true });
+      void refreshState({ silent: true });
     }, 5000);
 
     return () => window.clearInterval(intervalId);
-  }, [isAuthenticated, authToken]);
+  }, []);
 
   useEffect(() => {
     const channels = relayState?.channels ?? [];
@@ -1356,25 +1243,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
     }
   }, [relayState, selectedChannelId]);
 
-  const handleLogin = async (token: string) => {
-    setIsAuthenticating(true);
-    setAuthError(null);
-    const state = await refreshState(token);
-    setIsAuthenticating(false);
-    if (!state) {
-      setIsAuthenticated(false);
-    }
-  };
 
-  const handleLogout = () => {
-    localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
-    setAuthToken('');
-    setRelayState(null);
-    setSelectedChannelId(null);
-    setIsAuthenticated(false);
-    setAuthError(null);
-    setDashboardError(null);
-  };
 
   const runDiagnostic = async () => {
     setIsDiagOpen(true);
@@ -1382,7 +1251,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
     setDiagLines([]);
 
     try {
-      const nextState = await apiFetch<RelayState>('/api/state', authToken);
+      const nextState = await apiFetch<RelayState>('/api/state', ADMIN_TOKEN);
       setRelayState(nextState);
       setDiagLines(buildDiagnosticLines(nextState));
     } catch (error) {
@@ -1398,7 +1267,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
     setChannelFormError(null);
 
     try {
-      await apiFetch('/api/channels', authToken, {
+      await apiFetch('/api/channels', ADMIN_TOKEN, {
         method: 'POST',
         body: JSON.stringify({
           channelId: values.channelId.trim(),
@@ -1407,7 +1276,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
         }),
       });
       setChannelModalState(null);
-      await refreshState(authToken, { silent: true });
+      await refreshState({ silent: true });
       setSelectedChannelId(values.channelId.trim());
     } catch (error) {
       setChannelFormError(error instanceof Error ? error.message : 'failed to save channel');
@@ -1425,7 +1294,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
     setUserFormError(null);
 
     try {
-      await apiFetch(`/api/channels/${encodeURIComponent(selectedChannel.channelId)}/users`, authToken, {
+      await apiFetch(`/api/channels/${encodeURIComponent(selectedChannel.channelId)}/users`, ADMIN_TOKEN, {
         method: 'POST',
         body: JSON.stringify({
           senderId: values.senderId.trim(),
@@ -1441,7 +1310,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
         }),
       });
       setUserModalState(null);
-      await refreshState(authToken, { silent: true });
+      await refreshState({ silent: true });
     } catch (error) {
       setUserFormError(error instanceof Error ? error.message : 'failed to save user');
     } finally {
@@ -1450,20 +1319,20 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
   };
 
   const deleteChannel = async (channel: RelayChannel) => {
-    await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}`, authToken, {
+    await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}`, ADMIN_TOKEN, {
       method: 'DELETE',
     });
     if (selectedChannelId === channel.channelId) {
       setSelectedChannelId(null);
     }
-    await refreshState(authToken, { silent: true });
+    await refreshState({ silent: true });
   };
 
   const deleteUser = async (channel: RelayChannel, user: RelayUser) => {
-    await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}/users/${encodeURIComponent(user.senderId)}`, authToken, {
+    await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}/users/${encodeURIComponent(user.senderId)}`, ADMIN_TOKEN, {
       method: 'DELETE',
     });
-    await refreshState(authToken, { silent: true });
+    await refreshState({ silent: true });
   };
 
   const handleDeleteChannel = (channel: RelayChannel) => {
@@ -1500,17 +1369,6 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
     });
   };
 
-  if (!isAuthenticated) {
-    return (
-      <LoginScreen
-        onLogin={handleLogin}
-        initialToken={authToken}
-        isAuthenticating={isAuthenticating}
-        error={authError}
-      />
-    );
-  }
-
   const gatewayEndpoint = buildGatewayEndpoint(relayState);
   const backendEndpoint = normalizeBaseUrl(relayState?.pluginBackendUrl) || `${httpToWs(window.location.origin)}/backend`;
   const gatewayStatus = relayState && relayState.channels.length > 0 && relayState.stats.backendCount === 0 ? 'DEGRADED' : 'RUNNING';
@@ -1539,7 +1397,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
 
         <div className="font-mono text-xs text-cyan-600 tracking-widest flex items-center gap-3">
           <button
-            onClick={() => void refreshState(authToken)}
+            onClick={() => void refreshState()}
             className="px-3 py-1 border border-cyan-800 hover:bg-cyan-950/50 hover:text-cyan-400 transition-all flex items-center gap-2 group"
             disabled={isRefreshing}
           >
@@ -1552,12 +1410,6 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
           >
             <Activity className="w-3 h-3 group-hover:animate-pulse" />
             RUN_DIAGNOSTIC
-          </button>
-          <button
-            onClick={handleLogout}
-            className="px-3 py-1 border border-cyan-900/50 text-cyan-700 hover:text-cyan-300 hover:border-cyan-700 transition-all"
-          >
-            CLEAR_TOKEN
           </button>
           <button
             onClick={onLogtoSignOut}
