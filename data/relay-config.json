@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "channels": {
+    "wolf-node": {
+      "channelId": "wolf-node",
+      "label": "SG CLAW",
+      "secret": "a7b3e5db70b1505f11fd1970f5565e97",
+      "tokenParam": "token",
+      "users": [
+        {
+          "id": "usr-001",
+          "senderId": "usr-001",
+          "chatId": "main",
+          "token": "ae4cdcdf777263060672fcf06268e50a",
+          "enabled": true
+        }
+      ]
+    },
+    "apricot": {
+      "channelId": "apricot",
+      "label": "🟠 apricot",
+      "secret": "32a9584ef9fe10830c44ba62aef0b25b",
+      "tokenParam": "token",
+      "users": []
+    },
+    "nectarine": {
+      "channelId": "nectarine",
+      "label": "🍑 nectarine",
+      "secret": "db8a188d440ba94e1e301c3fe28d929b",
+      "tokenParam": "token",
+      "users": []
+    }
+  }
+}
