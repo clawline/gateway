@@ -1,11 +1,8 @@
-# ---- build admin frontend ----
+# ---- build admin frontend (if present) ----
 FROM node:22-alpine AS admin-build
-WORKDIR /build/admin
-COPY admin/package.json admin/package-lock.json* ./
-RUN npm ci
-COPY admin/ .
-RUN npm run build
-# vite outputs to /build/public (outDir: resolve(__dirname, "..", "public"))
+WORKDIR /build
+COPY . .
+RUN if [ -d "admin" ]; then cd admin && npm ci && npm run build; else mkdir -p public && echo '<!DOCTYPE html><html><body><h1>Admin UI not bundled</h1></body></html>' > public/index.html; fi
 
 # ---- production ----
 FROM node:22-alpine
