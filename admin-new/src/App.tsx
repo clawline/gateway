@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode, type SVGProps } from 'react';
+import { useLogto, type IdTokenClaims } from '@logto/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -1152,6 +1153,55 @@ function ZapLine() {
 }
 
 export default function App() {
+  const { isAuthenticated: isLogtoAuth, isLoading: isLogtoLoading, signIn, signOut, getIdTokenClaims } = useLogto();
+  const [logtoUser, setLogtoUser] = useState<IdTokenClaims | null>(null);
+
+  useEffect(() => {
+    if (isLogtoAuth) {
+      void getIdTokenClaims().then((claims) => {
+        if (claims) setLogtoUser(claims);
+      });
+    } else {
+      setLogtoUser(null);
+    }
+  }, [isLogtoAuth, getIdTokenClaims]);
+
+  if (isLogtoLoading) {
+    return (
+      <div className="min-h-screen bg-[#020617] text-cyan-500 font-mono flex items-center justify-center">
+        <div className="text-center space-y-4">
+          <Hexagon className="w-12 h-12 text-cyan-400 mx-auto animate-[spin_10s_linear_infinite]" />
+          <p className="text-xs tracking-widest">INITIALIZING_AUTH...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isLogtoAuth) {
+    return (
+      <div className="min-h-screen bg-[#020617] text-cyan-500 font-mono flex items-center justify-center relative overflow-hidden">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,_#083344_0%,_#020617_100%)] opacity-50" />
+        <div className="absolute inset-0 bg-[linear-gradient(rgba(6,182,212,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(6,182,212,0.03)_1px,transparent_1px)] bg-[size:40px_40px] [mask-image:radial-gradient(ellipse_80%_80%_at_50%_50%,#000_20%,transparent_100%)] pointer-events-none" />
+        <div className="relative z-10 w-full max-w-md p-8 bg-black/60 border border-cyan-900/50 shadow-[0_0_50px_rgba(6,182,212,0.1)] backdrop-blur-md text-center">
+          <Hexagon className="w-12 h-12 text-cyan-400 mx-auto mb-4 animate-[spin_10s_linear_infinite]" />
+          <h1 className="text-xl font-bold tracking-widest text-cyan-100 mb-2">{GATEWAY_NAME}</h1>
+          <p className="text-[10px] text-cyan-600 tracking-widest mb-8">SSO_AUTH_REQUIRED</p>
+          <button
+            onClick={() => void signIn(window.location.origin + '/callback')}
+            className="w-full py-3 bg-cyan-950/50 border border-cyan-700 text-cyan-300 hover:bg-cyan-900 hover:text-cyan-100 transition-all tracking-widest text-xs flex justify-center items-center gap-2"
+          >
+            <Lock className="w-4 h-4" />
+            SIGN_IN_WITH_SSO
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return <AdminDashboard logtoUser={logtoUser} onLogtoSignOut={() => void signOut(window.location.origin)} />;
+}
+
+function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaims | null; onLogtoSignOut: () => void }) {
   const [authToken, setAuthToken] = useState(() => localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) ?? '');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isAuthenticating, setIsAuthenticating] = useState(Boolean(localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY)));
@@ -1509,7 +1559,18 @@ export default function App() {
           >
             CLEAR_TOKEN
           </button>
+          <button
+            onClick={onLogtoSignOut}
+            className="px-3 py-1 border border-rose-900/50 text-rose-600 hover:text-rose-300 hover:border-rose-700 transition-all"
+          >
+            SIGN_OUT
+          </button>
           <div className="h-4 w-px bg-cyan-900/50" />
+          {logtoUser ? (
+            <span className="text-cyan-500 text-[10px]" title={logtoUser.sub}>
+              <Users className="w-3 h-3 inline mr-1" />{logtoUser.name ?? logtoUser.username ?? logtoUser.email ?? logtoUser.sub}
+            </span>
+          ) : null}
           <span className="text-cyan-400">{time}</span>
         </div>
       </header>

@@ -725,7 +725,7 @@ server.on("request", async (request, response) => {
     return;
   }
 
-  if (pathname === "/" || pathname === "/admin") {
+  if (pathname === "/" || pathname === "/admin" || pathname === "/callback") {
     try {
       const html = await readFile(join(publicDir, "index.html"), "utf8");
       writeHtml(response, html);
