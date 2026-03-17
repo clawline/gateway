@@ -257,6 +257,21 @@ type UserModalState =
     }
   | null;
 
+type DialogAccent = 'cyan' | 'fuchsia' | 'rose';
+
+type AppDialogConfig = {
+  title: string;
+  message: string;
+  detail?: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  accent?: DialogAccent;
+  icon?: typeof Activity;
+  onConfirm?: () => Promise<void> | void;
+};
+
+type AppDialogState = ({ mode: 'alert' | 'confirm' } & AppDialogConfig) | null;
+
 const ADMIN_TOKEN_STORAGE_KEY = 'clawline-admin-token';
 const GATEWAY_NAME = 'CLAWLINE_GATEWAY';
 const GATEWAY_VERSION = 'LIVE';
@@ -509,16 +524,27 @@ const ModalShell = ({
   children,
   onClose,
   maxWidth = 'max-w-2xl',
+  closeDisabled = false,
 }: {
-  accent?: 'cyan' | 'fuchsia';
+  accent?: DialogAccent;
   title: string;
   icon: typeof Activity;
   children: ReactNode;
   onClose: () => void;
   maxWidth?: string;
+  closeDisabled?: boolean;
 }) => {
   const accentClasses =
-    accent === 'fuchsia'
+    accent === 'rose'
+      ? {
+          border: 'border-rose-500/30',
+          shadow: 'shadow-[0_0_50px_rgba(244,63,94,0.2)]',
+          headerBorder: 'border-rose-900/50',
+          headerBg: 'bg-rose-950/20',
+          text: 'text-rose-400',
+          close: 'text-rose-600 hover:text-rose-400',
+        }
+      : accent === 'fuchsia'
       ? {
           border: 'border-fuchsia-500/30',
           shadow: 'shadow-[0_0_50px_rgba(217,70,239,0.2)]',
@@ -544,7 +570,11 @@ const ModalShell = ({
             <Icon className="w-5 h-5" />
             <span className="font-mono text-sm font-bold tracking-widest uppercase">{title}</span>
           </div>
-          <button onClick={onClose} className={cn('font-mono text-xs', accentClasses.close)}>
+          <button
+            onClick={onClose}
+            disabled={closeDisabled}
+            className={cn('font-mono text-xs disabled:opacity-40 disabled:cursor-not-allowed', accentClasses.close)}
+          >
             [ CLOSE ]
           </button>
         </div>
@@ -671,6 +701,76 @@ const DiagnosticModal = ({
             </div>
           ))
         )}
+      </div>
+    </ModalShell>
+  );
+};
+
+const AppDialogModal = ({
+  state,
+  isSubmitting,
+  error,
+  onClose,
+  onConfirm,
+}: {
+  state: AppDialogState;
+  isSubmitting: boolean;
+  error: string | null;
+  onClose: () => void;
+  onConfirm: () => void;
+}) => {
+  if (!state) {
+    return null;
+  }
+
+  const isConfirm = state.mode === 'confirm';
+  const accent = state.accent ?? (isConfirm ? 'rose' : 'cyan');
+  const Icon = state.icon ?? (accent === 'rose' ? ShieldAlert : Activity);
+  const primaryButtonClass =
+    accent === 'rose'
+      ? 'bg-rose-950/50 border-rose-700 text-rose-200 hover:bg-rose-900 hover:text-rose-50'
+      : accent === 'fuchsia'
+        ? 'bg-fuchsia-950/50 border-fuchsia-700 text-fuchsia-200 hover:bg-fuchsia-900 hover:text-fuchsia-50'
+        : 'bg-cyan-950/50 border-cyan-700 text-cyan-300 hover:bg-cyan-900 hover:text-cyan-100';
+
+  return (
+    <ModalShell
+      title={state.title}
+      icon={Icon}
+      accent={accent}
+      onClose={onClose}
+      maxWidth="max-w-xl"
+      closeDisabled={isSubmitting}
+    >
+      <div className="p-6 bg-black/40 font-mono text-sm space-y-5 overflow-y-auto">
+        <div className="space-y-3">
+          <p className="text-slate-100 leading-relaxed whitespace-pre-wrap">{state.message}</p>
+          {state.detail ? <p className="text-xs text-slate-400 leading-relaxed whitespace-pre-wrap">{state.detail}</p> : null}
+        </div>
+        {error ? <div className="text-rose-400 text-xs border border-rose-900/40 bg-rose-950/20 px-3 py-2">{error}</div> : null}
+        <div className="flex justify-end gap-3 pt-2">
+          {isConfirm ? (
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={isSubmitting}
+              className="px-4 py-2 border border-slate-800 text-slate-400 hover:text-slate-100 hover:border-slate-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {state.cancelLabel ?? 'CANCEL'}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={isSubmitting}
+            className={cn(
+              'px-4 py-2 border transition-colors disabled:opacity-60 disabled:cursor-not-allowed',
+              primaryButtonClass,
+            )}
+          >
+            {isSubmitting ? 'PROCESSING...' : state.confirmLabel ?? (isConfirm ? 'CONFIRM' : 'OK')}
+          </button>
+        </div>
       </div>
     </ModalShell>
   );
@@ -1070,6 +1170,9 @@ export default function App() {
   const [userFormError, setUserFormError] = useState<string | null>(null);
   const [isChannelSubmitting, setIsChannelSubmitting] = useState(false);
   const [isUserSubmitting, setIsUserSubmitting] = useState(false);
+  const [appDialogState, setAppDialogState] = useState<AppDialogState>(null);
+  const [appDialogError, setAppDialogError] = useState<string | null>(null);
+  const [isAppDialogSubmitting, setIsAppDialogSubmitting] = useState(false);
 
   const [isDiagOpen, setIsDiagOpen] = useState(false);
   const [isDiagLoading, setIsDiagLoading] = useState(false);
@@ -1079,6 +1182,46 @@ export default function App() {
   const configChannel = relayState?.channels.find((channel) => channel.channelId === configChannelId) ?? null;
   const qrChannel = relayState?.channels.find((channel) => channel.channelId === qrTarget?.channelId) ?? null;
   const qrUser = qrChannel?.users.find((user) => user.senderId === qrTarget?.senderId) ?? null;
+
+  const openConfirmDialog = (config: AppDialogConfig) => {
+    setAppDialogError(null);
+    setAppDialogState({
+      mode: 'confirm',
+      ...config,
+    });
+  };
+
+  const closeAppDialog = () => {
+    if (isAppDialogSubmitting) {
+      return;
+    }
+    setAppDialogError(null);
+    setAppDialogState(null);
+  };
+
+  const handleAppDialogConfirm = async () => {
+    if (!appDialogState) {
+      return;
+    }
+
+    if (!appDialogState.onConfirm) {
+      closeAppDialog();
+      return;
+    }
+
+    setIsAppDialogSubmitting(true);
+    setAppDialogError(null);
+
+    try {
+      await appDialogState.onConfirm();
+      setAppDialogState(null);
+      setAppDialogError(null);
+    } catch (error) {
+      setAppDialogError(error instanceof Error ? error.message : 'action failed');
+    } finally {
+      setIsAppDialogSubmitting(false);
+    }
+  };
 
   const refreshState = async (token = authToken, options?: { silent?: boolean; keepAuthError?: boolean }) => {
     if (!token.trim()) {
@@ -1256,47 +1399,55 @@ export default function App() {
     }
   };
 
-  const handleDeleteChannel = async (channel: RelayChannel) => {
-    const confirmed = window.confirm(`Delete channel "${channel.channelId}"? This will also disconnect any active backend/client sessions.`);
-    if (!confirmed) {
-      return;
+  const deleteChannel = async (channel: RelayChannel) => {
+    await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}`, authToken, {
+      method: 'DELETE',
+    });
+    if (selectedChannelId === channel.channelId) {
+      setSelectedChannelId(null);
     }
-
-    try {
-      await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}`, authToken, {
-        method: 'DELETE',
-      });
-      if (selectedChannelId === channel.channelId) {
-        setSelectedChannelId(null);
-      }
-      await refreshState(authToken, { silent: true });
-    } catch (error) {
-      setDashboardError(error instanceof Error ? error.message : 'failed to delete channel');
-    }
+    await refreshState(authToken, { silent: true });
   };
 
-  const handleDeleteUser = async (user: RelayUser) => {
+  const deleteUser = async (channel: RelayChannel, user: RelayUser) => {
+    await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}/users/${encodeURIComponent(user.senderId)}`, authToken, {
+      method: 'DELETE',
+    });
+    await refreshState(authToken, { silent: true });
+  };
+
+  const handleDeleteChannel = (channel: RelayChannel) => {
+    openConfirmDialog({
+      title: 'DELETE_CHANNEL',
+      message: `Delete channel "${channel.channelId}"?`,
+      detail: 'This will also disconnect any active backend/client sessions.',
+      confirmLabel: 'DELETE_CHANNEL',
+      cancelLabel: 'KEEP_CHANNEL',
+      accent: 'rose',
+      icon: Trash2,
+      onConfirm: async () => {
+        await deleteChannel(channel);
+      },
+    });
+  };
+
+  const handleDeleteUser = (user: RelayUser) => {
     if (!selectedChannel) {
       return;
     }
 
-    const confirmed = window.confirm(`Delete user "${user.senderId}" from channel "${selectedChannel.channelId}"?`);
-    if (!confirmed) {
-      return;
-    }
-
-    try {
-      await apiFetch(
-        `/api/channels/${encodeURIComponent(selectedChannel.channelId)}/users/${encodeURIComponent(user.senderId)}`,
-        authToken,
-        {
-          method: 'DELETE',
-        },
-      );
-      await refreshState(authToken, { silent: true });
-    } catch (error) {
-      setDashboardError(error instanceof Error ? error.message : 'failed to delete user');
-    }
+    openConfirmDialog({
+      title: 'DELETE_USER',
+      message: `Delete user "${user.senderId}" from channel "${selectedChannel.channelId}"?`,
+      detail: 'The token binding and any generated connection parameters for this user will stop working immediately.',
+      confirmLabel: 'DELETE_USER',
+      cancelLabel: 'KEEP_USER',
+      accent: 'rose',
+      icon: Trash2,
+      onConfirm: async () => {
+        await deleteUser(selectedChannel, user);
+      },
+    });
   };
 
   if (!isAuthenticated) {
@@ -1364,6 +1515,15 @@ export default function App() {
       </header>
 
       <DiagnosticModal isOpen={isDiagOpen} isLoading={isDiagLoading} lines={diagLines} onClose={() => setIsDiagOpen(false)} />
+      <AppDialogModal
+        state={appDialogState}
+        isSubmitting={isAppDialogSubmitting}
+        error={appDialogError}
+        onClose={closeAppDialog}
+        onConfirm={() => {
+          void handleAppDialogConfirm();
+        }}
+      />
       <NodeConfigModal channel={configChannel} backendEndpoint={backendEndpoint} onClose={() => setConfigChannelId(null)} />
       <UserConnectModal user={qrUser} channel={qrChannel} relayState={relayState} onClose={() => setQrTarget(null)} />
       <ChannelFormModal
