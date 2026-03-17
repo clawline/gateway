@@ -12,7 +12,7 @@ permissions:
 
 env:
   REGISTRY: externalacr.azurecr.io
-  IMAGE_NAME: relay-gateway
+  IMAGE_NAME: clawline-gateway
 
 jobs:
   build-and-release:
