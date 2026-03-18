@@ -1109,7 +1109,11 @@ export default function App() {
           <h1 className="text-xl font-bold tracking-widest text-cyan-100 mb-2">{GATEWAY_NAME}</h1>
           <p className="text-[10px] text-cyan-600 tracking-widest mb-8">SSO_AUTH_REQUIRED</p>
           <button
-            onClick={() => void signIn(window.location.origin + '/callback')}
+            onClick={() => void signIn({
+              redirectUri: window.location.origin + '/callback',
+              postRedirectUri: window.location.origin + '/',
+              clearTokens: true,
+            })}
             className="w-full py-3 bg-cyan-950/50 border border-cyan-700 text-cyan-300 hover:bg-cyan-900 hover:text-cyan-100 transition-all tracking-widest text-xs flex justify-center items-center gap-2"
           >
             <Lock className="w-4 h-4" />
