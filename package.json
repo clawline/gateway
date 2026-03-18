@@ -9,6 +9,7 @@
     "build:admin": "cd admin && npm run build"
   },
   "dependencies": {
+    "jose": "^6.2.1",
     "ws": "^8.19.0"
   }
 }

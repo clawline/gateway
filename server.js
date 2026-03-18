@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile, access } from "node:fs/promises";
 import { dirname, join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 
 const baseDir = dirname(fileURLToPath(import.meta.url));
 const configPath = process.env.RELAY_CONFIG_PATH || join(baseDir, "data", "relay-config.json");
@@ -19,6 +20,11 @@ const adminToken = normalizeNonEmpty(process.env.RELAY_ADMIN_TOKEN) || (() => {
   return generated;
 })();
 const publicBaseUrl = normalizeNonEmpty(process.env.RELAY_PUBLIC_BASE_URL);
+
+// Logto JWT verification
+const logtoEndpoint = normalizeNonEmpty(process.env.LOGTO_ENDPOINT) || "https://logto.dr.restry.cn";
+const logtoResource = normalizeNonEmpty(process.env.LOGTO_API_RESOURCE) || "https://gateway.clawlines.net/api";
+const jwks = createRemoteJWKSet(new URL(`${logtoEndpoint}/oidc/jwks`));
 const pluginBackendUrl =
   normalizeNonEmpty(process.env.RELAY_PLUGIN_BACKEND_URL) || `ws://127.0.0.1:${port}/backend`;
 
@@ -246,10 +252,36 @@ async function persistRelayConfig() {
   await writeFile(configPath, `${JSON.stringify(relayConfig, null, 2)}\n`, "utf8");
 }
 
-function requireAdmin(request, response, url) {
+async function verifyBearerToken(request) {
+  const auth = normalizeNonEmpty(request.headers["authorization"]);
+  if (!auth || !auth.startsWith("Bearer ")) {
+    return false;
+  }
+  const token = auth.slice("Bearer ".length).trim();
+  if (!token) {
+    return false;
+  }
+  try {
+    await jwtVerify(token, jwks, {
+      issuer: `${logtoEndpoint}/oidc`,
+      audience: logtoResource,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function requireAdmin(request, response, url) {
+  // Legacy admin token (X-Relay-Admin-Token header or query param)
   const headerToken = normalizeNonEmpty(request.headers["x-relay-admin-token"]);
   const queryToken = normalizeNonEmpty(url.searchParams.get("adminToken"));
   if (headerToken === adminToken || queryToken === adminToken) {
+    return true;
+  }
+
+  // Logto JWT Bearer token
+  if (await verifyBearerToken(request)) {
     return true;
   }
 
@@ -737,7 +769,7 @@ server.on("request", async (request, response) => {
   }
 
   if (pathname === "/api/state") {
-    if (!requireAdmin(request, response, url)) {
+    if (!(await requireAdmin(request, response, url))) {
       return;
     }
     await handleAdminState(response);
@@ -750,7 +782,7 @@ server.on("request", async (request, response) => {
   }
 
   if (pathname === "/api/channels" && request.method === "POST") {
-    if (!requireAdmin(request, response, url)) {
+    if (!(await requireAdmin(request, response, url))) {
       return;
     }
     try {
@@ -766,7 +798,7 @@ server.on("request", async (request, response) => {
 
   const channelMatch = pathname.match(/^\/api\/channels\/([^/]+)$/);
   if (channelMatch && request.method === "DELETE") {
-    if (!requireAdmin(request, response, url)) {
+    if (!(await requireAdmin(request, response, url))) {
       return;
     }
     const channelId = decodeURIComponent(channelMatch[1]);
@@ -776,7 +808,7 @@ server.on("request", async (request, response) => {
 
   const usersMatch = pathname.match(/^\/api\/channels\/([^/]+)\/users$/);
   if (usersMatch && request.method === "POST") {
-    if (!requireAdmin(request, response, url)) {
+    if (!(await requireAdmin(request, response, url))) {
       return;
     }
     const channelId = decodeURIComponent(usersMatch[1]);
@@ -793,7 +825,7 @@ server.on("request", async (request, response) => {
 
   const userMatch = pathname.match(/^\/api\/channels\/([^/]+)\/users\/([^/]+)$/);
   if (userMatch && request.method === "DELETE") {
-    if (!requireAdmin(request, response, url)) {
+    if (!(await requireAdmin(request, response, url))) {
       return;
     }
     const channelId = decodeURIComponent(userMatch[1]);

@@ -273,7 +273,7 @@ type AppDialogConfig = {
 
 type AppDialogState = ({ mode: 'alert' | 'confirm' } & AppDialogConfig) | null;
 
-const ADMIN_TOKEN = import.meta.env.VITE_ADMIN_TOKEN ?? '';
+const LOGTO_API_RESOURCE = 'https://gateway.clawlines.net/api';
 const GATEWAY_NAME = 'CLAWLINE_GATEWAY';
 const GATEWAY_VERSION = 'LIVE';
 
@@ -432,9 +432,9 @@ async function parseApiError(response: Response) {
   return `${response.status} ${response.statusText}`.trim();
 }
 
-async function apiFetch<T>(path: string, token: string, init?: RequestInit) {
+async function apiFetch<T>(path: string, accessToken: string, init?: RequestInit) {
   const headers = new Headers(init?.headers);
-  headers.set('X-Relay-Admin-Token', token);
+  headers.set('Authorization', `Bearer ${accessToken}`);
   if (init?.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
@@ -1075,7 +1075,7 @@ function ZapLine() {
 }
 
 export default function App() {
-  const { isAuthenticated: isLogtoAuth, isLoading: isLogtoLoading, signIn, signOut, getIdTokenClaims } = useLogto();
+  const { isAuthenticated: isLogtoAuth, isLoading: isLogtoLoading, signIn, signOut, getIdTokenClaims, getAccessToken } = useLogto();
   const [logtoUser, setLogtoUser] = useState<IdTokenClaims | null>(null);
 
   useEffect(() => {
@@ -1120,14 +1120,16 @@ export default function App() {
     );
   }
 
-  return <AdminDashboard logtoUser={logtoUser} onLogtoSignOut={() => void signOut(window.location.origin)} />;
+  return <AdminDashboard logtoUser={logtoUser} onLogtoSignOut={() => void signOut(window.location.origin)} getAccessToken={getAccessToken} />;
 }
 
-function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaims | null; onLogtoSignOut: () => void }) {
+function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUser: IdTokenClaims | null; onLogtoSignOut: () => void; getAccessToken: (resource?: string) => Promise<string> }) {
   const [dashboardError, setDashboardError] = useState<string | null>(null);
   const [relayState, setRelayState] = useState<RelayState | null>(null);
   const [time, setTime] = useState(new Date().toISOString());
   const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const fetchToken = () => getAccessToken(LOGTO_API_RESOURCE);
 
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
   const [configChannelId, setConfigChannelId] = useState<string | null>(null);
@@ -1197,7 +1199,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
     }
 
     try {
-      const nextState = await apiFetch<RelayState>('/api/state', ADMIN_TOKEN);
+      const nextState = await apiFetch<RelayState>('/api/state', await fetchToken());
       setRelayState(nextState);
       setDashboardError(null);
       return nextState;
@@ -1251,7 +1253,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
     setDiagLines([]);
 
     try {
-      const nextState = await apiFetch<RelayState>('/api/state', ADMIN_TOKEN);
+      const nextState = await apiFetch<RelayState>('/api/state', await fetchToken());
       setRelayState(nextState);
       setDiagLines(buildDiagnosticLines(nextState));
     } catch (error) {
@@ -1267,7 +1269,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
     setChannelFormError(null);
 
     try {
-      await apiFetch('/api/channels', ADMIN_TOKEN, {
+      await apiFetch('/api/channels', await fetchToken(), {
         method: 'POST',
         body: JSON.stringify({
           channelId: values.channelId.trim(),
@@ -1294,7 +1296,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
     setUserFormError(null);
 
     try {
-      await apiFetch(`/api/channels/${encodeURIComponent(selectedChannel.channelId)}/users`, ADMIN_TOKEN, {
+      await apiFetch(`/api/channels/${encodeURIComponent(selectedChannel.channelId)}/users`, await fetchToken(), {
         method: 'POST',
         body: JSON.stringify({
           senderId: values.senderId.trim(),
@@ -1319,7 +1321,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
   };
 
   const deleteChannel = async (channel: RelayChannel) => {
-    await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}`, ADMIN_TOKEN, {
+    await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}`, await fetchToken(), {
       method: 'DELETE',
     });
     if (selectedChannelId === channel.channelId) {
@@ -1329,7 +1331,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
   };
 
   const deleteUser = async (channel: RelayChannel, user: RelayUser) => {
-    await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}/users/${encodeURIComponent(user.senderId)}`, ADMIN_TOKEN, {
+    await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}/users/${encodeURIComponent(user.senderId)}`, await fetchToken(), {
       method: 'DELETE',
     });
     await refreshState({ silent: true });
