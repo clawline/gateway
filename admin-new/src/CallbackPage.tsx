@@ -1,20 +1,7 @@
 import { useHandleSignInCallback } from '@logto/react';
 import { useNavigate } from 'react-router-dom';
-import { isSecureContext } from './auth.tsx';
 
 export function CallbackPage() {
-  const navigate = useNavigate();
-
-  // In insecure (HTTP) context, Logto is completely bypassed — no callback to handle.
-  if (!isSecureContext) {
-    navigate('/', { replace: true });
-    return null;
-  }
-
-  return <LogtoCallbackHandler />;
-}
-
-function LogtoCallbackHandler() {
   const navigate = useNavigate();
   const { isLoading, error } = useHandleSignInCallback(() => {
     navigate('/', { replace: true });
