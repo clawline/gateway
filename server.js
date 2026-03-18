@@ -1,13 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdir, readFile, writeFile, access } from "node:fs/promises";
+import { readFile, access } from "node:fs/promises";
 import { dirname, join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import {
+  createRelayConfigStore,
+  isRelayConfigEmpty,
+  loadSeedConfigFromEnv,
+} from "./lib/relay-config-store.js";
+import {
+  normalizeChannelRecord,
+  normalizeNonEmpty,
+  normalizeUserRecord,
+} from "./lib/relay-config.js";
 
 const baseDir = dirname(fileURLToPath(import.meta.url));
-const configPath = process.env.RELAY_CONFIG_PATH || join(baseDir, "data", "relay-config.json");
+const relayStore = createRelayConfigStore({ baseDir });
+const configPath = relayStore.configPath;
 const publicDir = join(baseDir, "public");
 const MIME_TYPES = { ".html": "text/html; charset=utf-8", ".css": "text/css", ".js": "application/javascript", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2", ".woff": "font/woff" };
 const host = process.env.RELAY_HOST || "0.0.0.0";
@@ -40,37 +51,6 @@ let relayConfig = {
   version: 1,
   channels: {},
 };
-
-function normalizeNonEmpty(value) {
-  const normalized = String(value ?? "").trim();
-  return normalized || undefined;
-}
-
-function normalizeAgentList(value) {
-  if (Array.isArray(value)) {
-    const normalized = value
-      .map((item) => normalizeNonEmpty(item)?.toLowerCase())
-      .filter(Boolean);
-    if (normalized.includes("*")) {
-      return undefined;
-    }
-    return normalized.length > 0 ? normalized : undefined;
-  }
-
-  const text = normalizeNonEmpty(value);
-  if (!text) {
-    return undefined;
-  }
-
-  const normalized = text
-    .split(",")
-    .map((item) => normalizeNonEmpty(item)?.toLowerCase())
-    .filter(Boolean);
-  if (normalized.includes("*")) {
-    return undefined;
-  }
-  return normalized.length > 0 ? normalized : undefined;
-}
 
 function maskSecret(value) {
   const secret = normalizeNonEmpty(value);
@@ -150,106 +130,23 @@ function sendJson(ws, payload) {
   ws.send(JSON.stringify(payload));
 }
 
-function ensureRelayConfigShape(value) {
-  const output = {
-    version: 1,
-    channels: {},
-  };
-
-  if (!value || typeof value !== "object") {
-    return output;
-  }
-
-  const inputChannels =
-    value.version === 1 && value.channels && typeof value.channels === "object"
-      ? value.channels
-      : value;
-
-  for (const [channelId, channelValue] of Object.entries(inputChannels)) {
-    const normalizedChannel = normalizeChannelRecord(channelId, channelValue, undefined);
-    output.channels[channelId] = normalizedChannel;
-  }
-
-  return output;
-}
-
-function normalizeChannelRecord(channelId, value, existing) {
-  const normalizedChannelId = normalizeNonEmpty(channelId);
-  if (!normalizedChannelId) {
-    throw new Error("channelId is required");
-  }
-
-  const source = value && typeof value === "object" ? value : {};
-  const secret =
-    normalizeNonEmpty(source.secret) ??
-    (typeof value === "string" ? normalizeNonEmpty(value) : undefined) ??
-    existing?.secret ??
-    randomUUID().replace(/-/g, "");
-
-  const tokenParam = normalizeNonEmpty(source.tokenParam) ?? existing?.tokenParam ?? "token";
-  const label = normalizeNonEmpty(source.label) ?? existing?.label;
-  const usersInput = Array.isArray(source.users) ? source.users : existing?.users ?? [];
-  const users = usersInput
-    .map((user) => normalizeUserRecord(user, undefined))
-    .filter(Boolean);
-
-  return {
-    channelId: normalizedChannelId,
-    label,
-    secret,
-    tokenParam,
-    users,
-  };
-}
-
-function normalizeUserRecord(value, existing) {
-  const source = value && typeof value === "object" ? value : {};
-  const senderId = normalizeNonEmpty(source.senderId) ?? existing?.senderId;
-  if (!senderId) {
-    throw new Error("senderId is required");
-  }
-
-  const token = normalizeNonEmpty(source.token) ?? existing?.token ?? randomUUID().replace(/-/g, "");
-  const hasAllowAgents = Object.prototype.hasOwnProperty.call(source, "allowAgents");
-  return {
-    id: normalizeNonEmpty(source.id) ?? existing?.id ?? senderId,
-    senderId,
-    chatId: normalizeNonEmpty(source.chatId) ?? existing?.chatId,
-    token,
-    allowAgents: hasAllowAgents ? normalizeAgentList(source.allowAgents) : existing?.allowAgents,
-    enabled: source.enabled === false ? false : existing?.enabled === false ? false : true,
-  };
-}
-
 async function loadRelayConfig() {
-  try {
-    const persisted = await readFile(configPath, "utf8");
-    relayConfig = ensureRelayConfigShape(JSON.parse(persisted));
+  relayConfig = await relayStore.loadConfig();
+
+  if (!isRelayConfigEmpty(relayConfig)) {
     return;
-  } catch (error) {
-    if (error?.code !== "ENOENT") {
-      console.error("[relay] failed to read config file:", error);
+  }
+
+  try {
+    const seedConfig = await loadSeedConfigFromEnv();
+    if (!seedConfig) {
+      return;
     }
-  }
-
-  const raw = process.env.RELAY_CHANNELS_JSON;
-  if (!raw) {
-    relayConfig = ensureRelayConfigShape({});
-    return;
-  }
-
-  try {
-    relayConfig = ensureRelayConfigShape(JSON.parse(raw));
-    await persistRelayConfig();
+    relayConfig = seedConfig;
+    await relayStore.replaceConfig(relayConfig);
   } catch (error) {
     console.error("[relay] failed to parse RELAY_CHANNELS_JSON:", error);
-    relayConfig = ensureRelayConfigShape({});
   }
-}
-
-async function persistRelayConfig() {
-  await mkdir(dirname(configPath), { recursive: true });
-  await writeFile(configPath, `${JSON.stringify(relayConfig, null, 2)}\n`, "utf8");
 }
 
 async function verifyBearerToken(request) {
@@ -314,6 +211,28 @@ async function parseJsonBody(request) {
       }
     });
     request.on("error", reject);
+  });
+}
+
+function isClientInputError(error) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return (
+    error instanceof SyntaxError ||
+    error.message === "payload too large" ||
+    error.message.endsWith("is required")
+  );
+}
+
+function writeRequestError(response, error) {
+  const statusCode = isClientInputError(error) ? 400 : 500;
+  if (statusCode === 500) {
+    console.error("[relay] request failed:", error);
+  }
+  writeJson(response, statusCode, {
+    ok: false,
+    error: error instanceof Error ? error.message : "request failed",
   });
 }
 
@@ -648,8 +567,8 @@ async function handleUpsertChannel(request, response) {
 
   const existing = getChannelConfig(channelId);
   const next = normalizeChannelRecord(channelId, body, existing);
+  await relayStore.upsertChannel(next);
   relayConfig.channels[channelId] = next;
-  await persistRelayConfig();
 
   writeJson(response, 200, {
     ok: true,
@@ -663,10 +582,14 @@ async function handleDeleteChannel(response, channelId) {
     return;
   }
 
+  const deleted = await relayStore.deleteChannel(channelId);
+  if (!deleted) {
+    writeJson(response, 404, { ok: false, error: "channel not found" });
+    return;
+  }
   closeBackendChannel(channelId, 1012, "channel removed");
   backendPresence.delete(channelId);
   delete relayConfig.channels[channelId];
-  await persistRelayConfig();
 
   writeJson(response, 200, {
     ok: true,
@@ -692,13 +615,13 @@ async function handleUpsertUser(request, response, channelId) {
   const existingUser = existingIndex >= 0 ? channel.users[existingIndex] : undefined;
   const nextUser = normalizeUserRecord(body, existingUser);
 
+  await relayStore.upsertUser(channelId, nextUser);
+
   if (existingIndex >= 0) {
     channel.users[existingIndex] = nextUser;
   } else {
     channel.users.push(nextUser);
   }
-
-  await persistRelayConfig();
 
   writeJson(response, 200, {
     ok: true,
@@ -720,8 +643,12 @@ async function handleDeleteUser(response, channelId, senderId) {
     return;
   }
 
+  const deleted = await relayStore.deleteUser(channelId, senderId);
+  if (!deleted) {
+    writeJson(response, 404, { ok: false, error: "user not found" });
+    return;
+  }
   channel.users = nextUsers;
-  await persistRelayConfig();
 
   writeJson(response, 200, {
     ok: true,
@@ -788,10 +715,7 @@ server.on("request", async (request, response) => {
     try {
       await handleUpsertChannel(request, response);
     } catch (error) {
-      writeJson(response, 400, {
-        ok: false,
-        error: error instanceof Error ? error.message : "invalid request",
-      });
+      writeRequestError(response, error);
     }
     return;
   }
@@ -815,10 +739,7 @@ server.on("request", async (request, response) => {
     try {
       await handleUpsertUser(request, response, channelId);
     } catch (error) {
-      writeJson(response, 400, {
-        ok: false,
-        error: error instanceof Error ? error.message : "invalid request",
-      });
+      writeRequestError(response, error);
     }
     return;
   }
@@ -871,6 +792,7 @@ server.on("upgrade", (request, socket, head) => {
 });
 
 await loadRelayConfig();
+console.log(`[relay] config storage: ${configPath}`);
 
 server.listen(port, host, () => {
   console.log(`[relay] listening on ${host}:${port}`);

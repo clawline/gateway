@@ -16,17 +16,17 @@
         }
       ]
     },
-    "apricot": {
-      "channelId": "apricot",
-      "label": "🟠 apricot",
-      "secret": "32a9584ef9fe10830c44ba62aef0b25b",
-      "tokenParam": "token",
-      "users": []
-    },
     "nectarine": {
       "channelId": "nectarine",
       "label": "🍑 nectarine",
       "secret": "db8a188d440ba94e1e301c3fe28d929b",
+      "tokenParam": "token",
+      "users": []
+    },
+    "dragon-fruit": {
+      "channelId": "dragon-fruit",
+      "label": "🐉 dragon-fruit",
+      "secret": "94222416b51b4ffbada52b5458377da7",
       "tokenParam": "token",
       "users": []
     }

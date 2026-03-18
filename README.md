@@ -12,35 +12,50 @@
 ## 启动
 
 ```bash
-cd src/relay-gateway
 npm install
-RELAY_PORT=19080 \
-RELAY_CHANNELS_JSON='{"demo":{"secret":"replace-me"}}' \
+RELAY_PORT=3021 \
+RELAY_SUPABASE_URL=https://your-project-ref.supabase.co \
+RELAY_SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key \
 npm start
 ```
 
-或使用持久化配置文件：
+默认情况下，网关会把 `cl_channels` 和 `cl_channel_users` 作为主存储，并在启动时从 Supabase 读取配置。
+如果没有配置 Supabase，则会回退到本地 `data/relay-config.json` 文件存储，便于本地开发或临时兜底。
 
-```bash
-cd src/relay-gateway
-npm install
-RELAY_PORT=19080 \
-RELAY_CONFIG_PATH=/path/to/relay-config.json \
-npm start
-```
+首次接入 Supabase 时，先把 [`supabase/schema.sql`](supabase/schema.sql) 的内容复制到 Supabase SQL Editor 执行一次。
 
 如果这是公网入口，推荐不要直接把 `RELAY_PORT` 暴露出去，而是让 `relay-gateway`
 只监听本机回环地址，再由 Caddy/Nginx 提供 `https://` 和 `wss://`：
 
 ```bash
-cd src/relay-gateway
 npm install
 RELAY_HOST=127.0.0.1 \
-RELAY_PORT=18080 \
-RELAY_CONFIG_PATH=/path/to/relay-config.json \
+RELAY_PORT=3021 \
+RELAY_SUPABASE_URL=https://your-project-ref.supabase.co \
+RELAY_SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key \
 RELAY_ADMIN_TOKEN=replace-me \
 npm start
 ```
+
+## 数据迁移
+
+如果当前还在使用本地 `data/relay-config.json`，先完成表结构创建，再执行一次性迁移：
+
+```bash
+RELAY_SUPABASE_URL=https://your-project-ref.supabase.co \
+RELAY_SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key \
+npm run migrate:supabase
+```
+
+也可以显式指定旧配置文件路径：
+
+```bash
+RELAY_SUPABASE_URL=https://your-project-ref.supabase.co \
+RELAY_SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key \
+node scripts/migrate-relay-config-to-supabase.js /path/to/relay-config.json
+```
+
+迁移脚本会把 JSON 配置同步到 Supabase，使数据库成为后续运行时的主数据源。本地 JSON 文件仍可保留作备份或 fallback。
 
 ## 环境变量
 
@@ -48,10 +63,17 @@ npm start
 |------|--------|------|
 | `RELAY_HOST` | `0.0.0.0` | 监听地址 |
 | `RELAY_PORT` | `19080` | 监听端口 |
-| `RELAY_CHANNELS_JSON` | `{}` | 首次启动的种子配置，兼容旧格式 `{"channel-id":{"secret":"xxx"}}` |
-| `RELAY_CONFIG_PATH` | `src/relay-gateway/data/relay-config.json` | 持久化配置文件路径 |
+| `RELAY_SUPABASE_URL` | - | Supabase 项目 URL，例如 `https://your-project-ref.supabase.co` |
+| `RELAY_SUPABASE_SERVICE_ROLE_KEY` | - | 服务端使用的 Supabase service role key，只能放在后端环境变量，不能暴露给前端 |
+| `RELAY_CHANNELS_JSON` | `{}` | 当主存储为空时的种子配置，兼容旧格式 `{"channel-id":{"secret":"xxx"}}` |
+| `RELAY_CONFIG_PATH` | `./data/relay-config.json` | 本地 fallback / 迁移输入文件路径；未配置 Supabase 时也作为主存储 |
 | `RELAY_ADMIN_TOKEN` | - | 可选管理台/API 管理 token |
+| `RELAY_PUBLIC_BASE_URL` | - | 对外展示给管理页和客户端的公共入口 URL |
 | `RELAY_PLUGIN_BACKEND_URL` | `ws://127.0.0.1:<RELAY_PORT>/backend` | 管理页里展示给 OpenClaw 插件的 backend 地址，默认指向本机回环 |
+| `LOGTO_ENDPOINT` | `https://logto.dr.restry.cn` | Logto OIDC endpoint |
+| `LOGTO_API_RESOURCE` | `https://gateway.clawlines.net/api` | Logto JWT audience/resource |
+
+仓库根目录提供了可复制的环境变量模板：[`.env.example`](.env.example)。
 
 ## 接入路径
 
@@ -89,7 +111,6 @@ channels:
 ### 构建
 
 ```bash
-cd src/relay-gateway
 docker build -t relay-gateway .
 ```
 
@@ -100,11 +121,12 @@ docker run -d \
   --name relay-gateway \
   -p 19080:19080 \
   -e RELAY_ADMIN_TOKEN=replace-me \
-  -v relay-data:/app/data \
+  -e RELAY_SUPABASE_URL=https://your-project-ref.supabase.co \
+  -e RELAY_SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key \
   relay-gateway
 ```
 
-`/app/data` 为持久化配置目录，包含 `relay-config.json`。挂载 volume 后配置在容器重建时不会丢失。
+如果容器场景仍想保留本地 fallback，可额外挂载 `/app/data` 并设置 `RELAY_CONFIG_PATH=/app/data/relay-config.json`。
 
 ### 搭配 Caddy 反代
 
@@ -116,7 +138,8 @@ docker run -d \
   -p 127.0.0.1:18080:19080 \
   -e RELAY_ADMIN_TOKEN=replace-me \
   -e RELAY_PUBLIC_BASE_URL=https://relay.example.com \
-  -v relay-data:/app/data \
+  -e RELAY_SUPABASE_URL=https://your-project-ref.supabase.co \
+  -e RELAY_SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key \
   relay-gateway
 ```
 
@@ -129,7 +152,9 @@ docker run -d \
 | `RELAY_ADMIN_TOKEN` | 自动生成（打印到日志） | **强烈建议手动设置** |
 | `RELAY_PORT` | `19080` | 容器内监听端口，一般无需修改 |
 | `RELAY_PUBLIC_BASE_URL` | - | 设置后管理页展示的连接地址会使用此 URL |
-| `RELAY_CONFIG_PATH` | `/app/data/relay-config.json` | 持久化配置路径 |
+| `RELAY_SUPABASE_URL` | - | Supabase 项目 URL |
+| `RELAY_SUPABASE_SERVICE_ROLE_KEY` | - | Supabase service role key |
+| `RELAY_CONFIG_PATH` | `/app/data/relay-config.json` | 本地 fallback / 迁移文件路径 |
 
 ## Caddy TLS 示例
 
@@ -137,7 +162,7 @@ docker run -d \
 
 仓库里提供了一个模板文件：
 
-- `src/relay-gateway/Caddyfile.example`
+- `Caddyfile.example`
 
 最小 Caddyfile 形态如下：
 
@@ -173,16 +198,19 @@ relay.example.com {
 
 ## 管理页前端开发
 
-管理页是一个标准的 React + Vite + shadcn/ui 项目，源码在 `admin/`，构建后输出到 `public/`。
+管理页是一个标准的 React + Vite + shadcn/ui 项目，源码在 `admin-new/`。
 
 ```bash
 # 安装管理页依赖
-cd admin && npm install
+cd admin-new && npm install
 
 # 开发模式（自动代理 /api 到 localhost:19080）
 npm run dev
 
-# 生产构建（输出到 ../public/）
+# 类型检查
+npx tsc --noEmit
+
+# 生产构建
 npm run build
 ```
 

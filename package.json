@@ -6,7 +6,8 @@
   "description": "Relay gateway for clawdbot clawline",
   "scripts": {
     "start": "node server.js",
-    "build:admin": "cd admin && npm run build"
+    "build:admin": "cd admin-new && npm run build",
+    "migrate:supabase": "node scripts/migrate-relay-config-to-supabase.js"
   },
   "dependencies": {
     "jose": "^6.2.1",
