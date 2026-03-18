@@ -14,6 +14,7 @@ COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY server.js .
+COPY lib/ ./lib/
 COPY --from=admin-build /build/public ./public
 
 ENV NODE_ENV=production
