@@ -1,1 +1,12 @@
 @import "tailwindcss";
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes highlightPulse {
+  0% { border-color: rgb(6 182 212 / 0.6); box-shadow: 0 0 12px rgb(6 182 212 / 0.2); }
+  50% { border-color: rgb(6 182 212 / 0.3); box-shadow: 0 0 4px rgb(6 182 212 / 0.1); }
+  100% { border-color: rgb(6 182 212 / 0.6); box-shadow: 0 0 12px rgb(6 182 212 / 0.2); }
+}

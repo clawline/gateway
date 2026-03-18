@@ -782,12 +782,14 @@ const ChannelFormModal = ({
   onClose,
   onSubmit,
   isSubmitting,
+  submitSuccess,
   error,
 }: {
   state: ChannelModalState;
   onClose: () => void;
   onSubmit: (values: ChannelFormValues) => Promise<void>;
   isSubmitting: boolean;
+  submitSuccess: boolean;
   error: string | null;
 }) => {
   const [form, setForm] = useState<ChannelFormValues>(() => {
@@ -902,10 +904,15 @@ const ChannelFormModal = ({
           </button>
           <button
             type="submit"
-            className="px-4 py-2 bg-cyan-950/50 border border-cyan-700 text-cyan-300 hover:bg-cyan-900 hover:text-cyan-100 transition-all disabled:opacity-60"
-            disabled={isSubmitting}
+            className={cn(
+              'px-4 py-2 border transition-all disabled:opacity-60',
+              submitSuccess
+                ? 'bg-emerald-950/50 border-emerald-500 text-emerald-300'
+                : 'bg-cyan-950/50 border-cyan-700 text-cyan-300 hover:bg-cyan-900 hover:text-cyan-100',
+            )}
+            disabled={isSubmitting || submitSuccess}
           >
-            {isSubmitting ? 'SAVING...' : isEditing ? 'UPDATE_NODE' : 'CREATE_NODE'}
+            {submitSuccess ? '✓ CREATED' : isSubmitting ? 'SAVING...' : isEditing ? 'UPDATE_NODE' : 'CREATE_NODE'}
           </button>
         </div>
       </form>
@@ -919,6 +926,7 @@ const UserFormModal = ({
   onClose,
   onSubmit,
   isSubmitting,
+  submitSuccess,
   error,
 }: {
   state: UserModalState;
@@ -926,6 +934,7 @@ const UserFormModal = ({
   onClose: () => void;
   onSubmit: (values: UserFormValues) => Promise<void>;
   isSubmitting: boolean;
+  submitSuccess: boolean;
   error: string | null;
 }) => {
   const [form, setForm] = useState<UserFormValues>({
@@ -1059,10 +1068,15 @@ const UserFormModal = ({
           </button>
           <button
             type="submit"
-            className="px-4 py-2 bg-cyan-950/50 border border-cyan-700 text-cyan-300 hover:bg-cyan-900 hover:text-cyan-100 transition-all disabled:opacity-60"
-            disabled={isSubmitting}
+            className={cn(
+              'px-4 py-2 border transition-all disabled:opacity-60',
+              submitSuccess
+                ? 'bg-emerald-950/50 border-emerald-500 text-emerald-300'
+                : 'bg-cyan-950/50 border-cyan-700 text-cyan-300 hover:bg-cyan-900 hover:text-cyan-100',
+            )}
+            disabled={isSubmitting || submitSuccess}
           >
-            {isSubmitting ? 'SAVING...' : isEditing ? 'UPDATE_USER' : 'CREATE_USER'}
+            {submitSuccess ? '✓ CREATED' : isSubmitting ? 'SAVING...' : isEditing ? 'UPDATE_USER' : 'CREATE_USER'}
           </button>
         </div>
       </form>
@@ -1147,6 +1161,23 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
   const [appDialogState, setAppDialogState] = useState<AppDialogState>(null);
   const [appDialogError, setAppDialogError] = useState<string | null>(null);
   const [isAppDialogSubmitting, setIsAppDialogSubmitting] = useState(false);
+
+  // Toast notifications
+  const [toasts, setToasts] = useState<Array<{ id: string; message: string; type: 'success' | 'error' }>>([]);
+  const addToast = (message: string, type: 'success' | 'error' = 'success') => {
+    const id = crypto.randomUUID();
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 3000);
+  };
+  const removeToast = (id: string) => setToasts((prev) => prev.filter((t) => t.id !== id));
+
+  // Submit success feedback (brief ✓ on button before closing modal)
+  const [channelSubmitSuccess, setChannelSubmitSuccess] = useState(false);
+  const [userSubmitSuccess, setUserSubmitSuccess] = useState(false);
+
+  // Row highlight after create/edit
+  const [highlightChannelId, setHighlightChannelId] = useState<string | null>(null);
+  const [highlightUserId, setHighlightUserId] = useState<string | null>(null);
 
   const [isDiagOpen, setIsDiagOpen] = useState(false);
   const [isDiagLoading, setIsDiagLoading] = useState(false);
@@ -1271,21 +1302,37 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
   const submitChannel = async (values: ChannelFormValues) => {
     setIsChannelSubmitting(true);
     setChannelFormError(null);
+    setChannelSubmitSuccess(false);
+
+    const isEdit = channelModalState?.mode === 'edit';
+    const trimmedId = values.channelId.trim();
 
     try {
       await apiFetch('/api/channels', await fetchToken(), {
         method: 'POST',
         body: JSON.stringify({
-          channelId: values.channelId.trim(),
+          channelId: trimmedId,
           label: values.label.trim() || undefined,
           secret: values.secret.trim() || undefined,
         }),
       });
+      // Show ✓ feedback on button for 800ms
+      setChannelSubmitSuccess(true);
+      // Refresh data WHILE showing success (parallel)
+      const refreshPromise = refreshState({ silent: true });
+      await new Promise((r) => setTimeout(r, 800));
+      await refreshPromise;
+      // NOW close dialog — data is already refreshed
       setChannelModalState(null);
-      await refreshState({ silent: true });
-      setSelectedChannelId(values.channelId.trim());
+      setChannelSubmitSuccess(false);
+      setSelectedChannelId(trimmedId);
+      setHighlightChannelId(trimmedId);
+      setTimeout(() => setHighlightChannelId(null), 2500);
+      addToast(isEdit ? 'NODE_UPDATED ✓' : 'NODE_REGISTERED ✓', 'success');
     } catch (error) {
+      setChannelSubmitSuccess(false);
       setChannelFormError(error instanceof Error ? error.message : 'failed to save channel');
+      addToast(error instanceof Error ? error.message : 'CHANNEL_SAVE_FAILED', 'error');
     } finally {
       setIsChannelSubmitting(false);
     }
@@ -1298,12 +1345,16 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
 
     setIsUserSubmitting(true);
     setUserFormError(null);
+    setUserSubmitSuccess(false);
+
+    const isEdit = userModalState?.mode === 'edit';
+    const trimmedSenderId = values.senderId.trim();
 
     try {
       await apiFetch(`/api/channels/${encodeURIComponent(selectedChannel.channelId)}/users`, await fetchToken(), {
         method: 'POST',
         body: JSON.stringify({
-          senderId: values.senderId.trim(),
+          senderId: trimmedSenderId,
           chatId: values.chatId.trim() || undefined,
           token: values.token.trim() || undefined,
           allowAgents: values.allowAgents.trim()
@@ -1315,10 +1366,22 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
           enabled: values.enabled,
         }),
       });
+      // Show ✓ feedback on button for 800ms
+      setUserSubmitSuccess(true);
+      // Refresh data WHILE showing success (parallel)
+      const refreshPromise = refreshState({ silent: true });
+      await new Promise((r) => setTimeout(r, 800));
+      await refreshPromise;
+      // NOW close dialog — data is already refreshed
       setUserModalState(null);
-      await refreshState({ silent: true });
+      setUserSubmitSuccess(false);
+      setHighlightUserId(trimmedSenderId);
+      setTimeout(() => setHighlightUserId(null), 2500);
+      addToast(isEdit ? 'USER_UPDATED ✓' : 'USER_ADDED ✓', 'success');
     } catch (error) {
+      setUserSubmitSuccess(false);
       setUserFormError(error instanceof Error ? error.message : 'failed to save user');
+      addToast(error instanceof Error ? error.message : 'USER_SAVE_FAILED', 'error');
     } finally {
       setIsUserSubmitting(false);
     }
@@ -1332,6 +1395,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
       setSelectedChannelId(null);
     }
     await refreshState({ silent: true });
+    addToast('CHANNEL_DELETED ✓', 'success');
   };
 
   const deleteUser = async (channel: RelayChannel, user: RelayUser) => {
@@ -1339,6 +1403,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
       method: 'DELETE',
     });
     await refreshState({ silent: true });
+    addToast('USER_REMOVED ✓', 'success');
   };
 
   const handleDeleteChannel = (channel: RelayChannel) => {
@@ -1453,6 +1518,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
         }}
         onSubmit={submitChannel}
         isSubmitting={isChannelSubmitting}
+        submitSuccess={channelSubmitSuccess}
         error={channelFormError}
       />
       <UserFormModal
@@ -1464,8 +1530,29 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
         }}
         onSubmit={submitUser}
         isSubmitting={isUserSubmitting}
+        submitSuccess={userSubmitSuccess}
         error={userFormError}
       />
+
+      {/* Toast notifications */}
+      <div className="fixed bottom-4 right-4 z-[200] flex flex-col gap-2 pointer-events-none">
+        {toasts.map((t) => (
+          <div
+            key={t.id}
+            className={cn(
+              'pointer-events-auto px-4 py-2 font-mono text-xs tracking-widest border backdrop-blur-sm animate-[fadeSlideIn_0.3s_ease-out]',
+              t.type === 'success'
+                ? 'bg-cyan-950/80 border-cyan-500/50 text-cyan-300'
+                : 'bg-rose-950/80 border-rose-500/50 text-rose-300',
+            )}
+          >
+            <div className="flex items-center gap-3">
+              <span>{t.message}</span>
+              <button onClick={() => removeToast(t.id)} className="text-zinc-500 hover:text-zinc-300">×</button>
+            </div>
+          </div>
+        ))}
+      </div>
 
       <main className="flex-1 relative z-10 p-4 lg:p-6 flex flex-col gap-6 overflow-hidden">
         {dashboardError ? (
@@ -1515,7 +1602,9 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
                     onClick={() => setSelectedChannelId(channel.channelId)}
                     className={cn(
                       'px-4 py-2.5 border font-mono transition-all cursor-pointer group relative',
-                      selectedChannelId === channel.channelId
+                      highlightChannelId === channel.channelId
+                        ? 'bg-cyan-950/40 border-cyan-400/60 animate-[highlightPulse_1s_ease-in-out_2]'
+                        : selectedChannelId === channel.channelId
                         ? 'bg-cyan-950/40 border-cyan-500/50 shadow-[inset_0_0_20px_rgba(6,182,212,0.1)]'
                         : 'bg-black/40 border-cyan-900/30 hover:border-cyan-700/50',
                     )}
@@ -1634,7 +1723,10 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
                   </thead>
                   <tbody className="divide-y divide-cyan-900/20">
                     {selectedChannel.users.map((user) => (
-                      <tr key={user.senderId} className="hover:bg-cyan-950/20 transition-colors group">
+                      <tr key={user.senderId} className={cn(
+                        'hover:bg-cyan-950/20 transition-colors group',
+                        highlightUserId === user.senderId && 'bg-cyan-950/30 animate-[highlightPulse_1s_ease-in-out_2]',
+                      )}>
                         <td className="py-4 pl-4">
                           <div className="flex items-center gap-2">
                             <Lock className="w-3 h-3 text-cyan-600" />
