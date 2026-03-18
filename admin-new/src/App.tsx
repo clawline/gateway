@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactNode, type SVGProps } from 'react';
-import { useLogto, type IdTokenClaims } from '@logto/react';
+import type { IdTokenClaims } from '@logto/react';
+import { useAuth } from './auth.tsx';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -1075,7 +1076,7 @@ function ZapLine() {
 }
 
 export default function App() {
-  const { isAuthenticated: isLogtoAuth, isLoading: isLogtoLoading, signIn, signOut, getIdTokenClaims, getAccessToken } = useLogto();
+  const { isAuthenticated: isLogtoAuth, isLoading: isLogtoLoading, signIn, signOut, getIdTokenClaims, getAccessToken } = useAuth();
   const [logtoUser, setLogtoUser] = useState<IdTokenClaims | null>(null);
 
   useEffect(() => {

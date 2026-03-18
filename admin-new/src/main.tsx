@@ -1,7 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { LogtoProvider } from '@logto/react';
+import { AuthProvider } from './auth.tsx';
 import App from './App.tsx';
 import { CallbackPage } from './CallbackPage.tsx';
 import './index.css';
@@ -14,13 +14,13 @@ const logtoConfig = {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <LogtoProvider config={logtoConfig}>
+    <AuthProvider config={logtoConfig}>
       <BrowserRouter>
         <Routes>
           <Route path="/callback" element={<CallbackPage />} />
           <Route path="*" element={<App />} />
         </Routes>
       </BrowserRouter>
-    </LogtoProvider>
+    </AuthProvider>
   </StrictMode>,
 );
