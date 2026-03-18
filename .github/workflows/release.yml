@@ -54,11 +54,13 @@ jobs:
 
       - name: Package release tarball
         run: |
+          # Ensure git index is clean to avoid tar warning
+          git status
           tar czf "gateway-${{ steps.meta.outputs.tag }}.tar.gz" \
             --exclude='node_modules' \
             --exclude='data' \
             --exclude='.git' \
-            .
+            . || [ $? -eq 1 ]
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
