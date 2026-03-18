@@ -2,7 +2,9 @@
 FROM node:22-alpine AS admin-build
 WORKDIR /build
 COPY . .
-RUN if [ -d "admin" ]; then cd admin && npm ci && npm run build; else mkdir -p public && echo '<!DOCTYPE html><html><body><h1>Admin UI not bundled</h1></body></html>' > public/index.html; fi
+RUN if [ -d "admin-new" ]; then cd admin-new && npm ci && npm run build && cp -r dist ../public; \
+    elif [ -d "admin" ]; then cd admin && npm ci && npm run build; \
+    else mkdir -p public && echo '<!DOCTYPE html><html><body><h1>Admin UI not bundled</h1></body></html>' > public/index.html; fi
 
 # ---- production ----
 FROM node:22-alpine
