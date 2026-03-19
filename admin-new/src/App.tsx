@@ -1503,7 +1503,9 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
   };
 
   const gatewayEndpoint = buildGatewayEndpoint(relayState);
-  const backendEndpoint = normalizeBaseUrl(relayState?.pluginBackendUrl) || `${httpToWs(window.location.origin)}/backend`;
+  // Derive backend WS endpoint from publicBaseUrl (https→wss), NOT from pluginBackendUrl
+  // which may be a localhost address only reachable from the server itself.
+  const backendEndpoint = `${httpToWs(normalizeBaseUrl(relayState?.publicBaseUrl) || window.location.origin)}/backend`;
   const gatewayStatus = relayState && relayState.channels.length > 0 && relayState.stats.backendCount === 0 ? 'DEGRADED' : 'RUNNING';
 
   return (
