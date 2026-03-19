@@ -274,6 +274,7 @@ type AppDialogConfig = {
 type AppDialogState = ({ mode: 'alert' | 'confirm' } & AppDialogConfig) | null;
 
 const LOGTO_API_RESOURCE = 'https://gateway.clawlines.net/api';
+const LOGTO_APP_ID = 'anbr9zjc6bgd8099ecnx3';
 const GATEWAY_NAME = 'CLAWLINE_GATEWAY';
 const GATEWAY_VERSION = 'LIVE';
 
@@ -1156,7 +1157,50 @@ export default function App() {
     );
   }
 
-  return <AdminDashboard logtoUser={logtoUser} onLogtoSignOut={() => void signOut(window.location.origin)} getAccessToken={getAccessToken} />;
+  // Wrap getAccessToken with auto-recovery for stale sessions.
+  // If the stored refresh token was issued before the API resource was configured,
+  // Logto returns "oidc.invalid_target". We catch that, clear stale tokens, and
+  // silently re-trigger sign-in so the user gets a fresh grant that includes the resource.
+  const getAccessTokenSafe = async (resource?: string): Promise<string> => {
+    try {
+      return await getAccessToken(resource);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      const isInvalidTarget =
+        message.includes('invalid_target') ||
+        message.includes('resource indicator is missing');
+
+      if (isInvalidTarget) {
+        console.warn('[auth] Stale session detected (invalid_target). Clearing tokens and re-authenticating...');
+        // Clear all Logto-related storage for this app
+        const keysToRemove: string[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && (key.startsWith(`logto:${LOGTO_APP_ID}`) || key.includes('logto'))) {
+            keysToRemove.push(key);
+          }
+        }
+        keysToRemove.forEach((key) => localStorage.removeItem(key));
+        for (let i = sessionStorage.length - 1; i >= 0; i--) {
+          const key = sessionStorage.key(i);
+          if (key && key.includes('logto')) {
+            sessionStorage.removeItem(key);
+          }
+        }
+        // Re-trigger sign-in with clearTokens to get a fresh grant including the resource
+        void signIn({
+          redirectUri: window.location.origin + '/callback',
+          postRedirectUri: window.location.origin + '/',
+          clearTokens: true,
+        });
+        // Return a never-resolving promise so the UI doesn't flash errors while redirecting
+        return new Promise<string>(() => {});
+      }
+      throw err;
+    }
+  };
+
+  return <AdminDashboard logtoUser={logtoUser} onLogtoSignOut={() => void signOut(window.location.origin)} getAccessToken={getAccessTokenSafe} />;
 }
 
 function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUser: IdTokenClaims | null; onLogtoSignOut: () => void; getAccessToken: (resource?: string) => Promise<string> }) {
