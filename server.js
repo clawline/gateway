@@ -722,6 +722,76 @@ server.on("request", async (request, response) => {
     return;
   }
 
+  // ── Relay Nodes registry (from Supabase cl_relay_nodes) ──
+  if (pathname === "/api/relay-nodes" && request.method === "GET") {
+    if (!(await requireAdmin(request, response, url))) return;
+    const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+    const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+    if (!supabaseUrl || !supabaseKey) {
+      writeJson(response, 200, { ok: true, nodes: [], source: "none" });
+      return;
+    }
+    try {
+      const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_relay_nodes?select=id,name,url,admin_token&order=created_at`, {
+        headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` },
+      });
+      const rows = await res.json();
+      writeJson(response, 200, { ok: true, nodes: Array.isArray(rows) ? rows.map(r => ({ id: r.id, name: r.name, url: r.url, adminToken: r.admin_token })) : [], source: "supabase" });
+    } catch (err) {
+      writeJson(response, 500, { ok: false, error: String(err) });
+    }
+    return;
+  }
+
+  if (pathname === "/api/relay-nodes" && request.method === "POST") {
+    if (!(await requireAdmin(request, response, url))) return;
+    const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+    const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+    if (!supabaseUrl || !supabaseKey) {
+      writeJson(response, 400, { ok: false, error: "Supabase not configured" });
+      return;
+    }
+    try {
+      const body = await parseJsonBody(request);
+      const { id, name: nodeName, url: nodeUrl, adminToken: nodeToken } = body;
+      if (!id || !nodeName || !nodeUrl) { writeJson(response, 400, { ok: false, error: "id, name, url required" }); return; }
+      await fetch(`${supabaseUrl}/pg/rest/v1/cl_relay_nodes`, {
+        method: "POST",
+        headers: {
+          apikey: supabaseKey, authorization: `Bearer ${supabaseKey}`,
+          "content-type": "application/json",
+          prefer: "resolution=merge-duplicates",
+        },
+        body: JSON.stringify({ id, name: nodeName, url: nodeUrl.replace(/\/+$/, ""), admin_token: nodeToken || "" }),
+      });
+      writeJson(response, 200, { ok: true });
+    } catch (err) {
+      writeJson(response, 500, { ok: false, error: String(err) });
+    }
+    return;
+  }
+
+  if (pathname.startsWith("/api/relay-nodes/") && request.method === "DELETE") {
+    if (!(await requireAdmin(request, response, url))) return;
+    const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+    const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+    if (!supabaseUrl || !supabaseKey) {
+      writeJson(response, 400, { ok: false, error: "Supabase not configured" });
+      return;
+    }
+    const nodeId = decodeURIComponent(pathname.split("/").pop());
+    try {
+      await fetch(`${supabaseUrl}/pg/rest/v1/cl_relay_nodes?id=eq.${encodeURIComponent(nodeId)}`, {
+        method: "DELETE",
+        headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` },
+      });
+      writeJson(response, 200, { ok: true });
+    } catch (err) {
+      writeJson(response, 500, { ok: false, error: String(err) });
+    }
+    return;
+  }
+
   if (pathname === "/api/channels" && request.method === "POST") {
     if (!(await requireAdmin(request, response, url))) {
       return;

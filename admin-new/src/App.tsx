@@ -289,7 +289,7 @@ type RelayNode = {
 const RELAY_REGISTRY_KEY = 'relay-registry';
 const DEFAULT_RELAY: RelayNode = { id: 'default', name: 'relay.restry.cn', url: 'https://relay.restry.cn', adminToken: '' };
 
-function loadRelayRegistry(): RelayNode[] {
+function loadRelayRegistryLocal(): RelayNode[] {
   try {
     const raw = localStorage.getItem(RELAY_REGISTRY_KEY);
     if (!raw) return [DEFAULT_RELAY];
@@ -298,8 +298,36 @@ function loadRelayRegistry(): RelayNode[] {
   } catch { return [DEFAULT_RELAY]; }
 }
 
-function saveRelayRegistry(nodes: RelayNode[]) {
+function saveRelayRegistryLocal(nodes: RelayNode[]) {
   localStorage.setItem(RELAY_REGISTRY_KEY, JSON.stringify(nodes));
+}
+
+// Fetch relay nodes from server (Supabase-backed /api/relay-nodes)
+async function fetchRelayNodesFromServer(gatewayRelay: RelayNode, accessToken?: string): Promise<RelayNode[] | null> {
+  try {
+    const nodes = await apiFetch<{ ok: boolean; nodes: RelayNode[] }>('/api/relay-nodes', gatewayRelay, undefined, accessToken);
+    if (nodes.ok && Array.isArray(nodes.nodes) && nodes.nodes.length > 0) {
+      saveRelayRegistryLocal(nodes.nodes); // cache locally
+      return nodes.nodes;
+    }
+  } catch { /* fall through to local */ }
+  return null;
+}
+
+// Save relay node to server
+async function saveRelayNodeToServer(node: RelayNode, gatewayRelay: RelayNode, accessToken?: string): Promise<boolean> {
+  try {
+    await apiFetch('/api/relay-nodes', gatewayRelay, { method: 'POST', body: JSON.stringify(node) }, accessToken);
+    return true;
+  } catch { return false; }
+}
+
+// Delete relay node from server
+async function deleteRelayNodeFromServer(nodeId: string, gatewayRelay: RelayNode, accessToken?: string): Promise<boolean> {
+  try {
+    await apiFetch(`/api/relay-nodes/${encodeURIComponent(nodeId)}`, gatewayRelay, { method: 'DELETE' }, accessToken);
+    return true;
+  } catch { return false; }
 }
 
 
@@ -1241,22 +1269,39 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   // ── Multi-Relay state ──────────────────────────────────────
-  const [relayNodes, setRelayNodes] = useState<RelayNode[]>(() => loadRelayRegistry());
+  const [relayNodes, setRelayNodes] = useState<RelayNode[]>(() => loadRelayRegistryLocal());
   const [selectedRelayId, setSelectedRelayId] = useState<string>(relayNodes[0]?.id ?? 'default');
   const [isRelaySettingsOpen, setIsRelaySettingsOpen] = useState(false);
   const [editingRelay, setEditingRelay] = useState<RelayNode | null>(null);
 
   const activeRelay = relayNodes.find((n) => n.id === selectedRelayId) ?? relayNodes[0] ?? DEFAULT_RELAY;
 
+  // The "gateway relay" is the host serving the SPA (for /api/relay-nodes)
+  const gatewayRelay: RelayNode = { id: '_gateway', name: 'gateway', url: window.location.origin, adminToken: '' };
+
   // Fetch Logto JWT for relays that need it (e.g. gateway.clawlines.net)
   const fetchToken = async (): Promise<string | undefined> => {
     try { return await getAccessToken(LOGTO_API_RESOURCE); } catch { return undefined; }
   };
 
-  const updateRelayNodes = (next: RelayNode[]) => {
+  const updateRelayNodes = async (next: RelayNode[]) => {
     setRelayNodes(next);
-    saveRelayRegistry(next);
+    saveRelayRegistryLocal(next);
   };
+
+  // Load relay nodes from server on mount
+  useEffect(() => {
+    (async () => {
+      const token = await fetchToken();
+      const serverNodes = await fetchRelayNodesFromServer(gatewayRelay, token);
+      if (serverNodes) {
+        setRelayNodes(serverNodes);
+        if (!serverNodes.find((n) => n.id === selectedRelayId)) {
+          setSelectedRelayId(serverNodes[0]?.id ?? 'default');
+        }
+      }
+    })();
+  }, []);
 
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
   const [configChannelId, setConfigChannelId] = useState<string | null>(null);
@@ -1633,7 +1678,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
       {isRelaySettingsOpen && (
         <ModalShell title="RELAY_NODES" icon={Server} onClose={() => { setIsRelaySettingsOpen(false); setEditingRelay(null); }}>
           {editingRelay ? (
-            <form onSubmit={(e) => {
+            <form onSubmit={async (e) => {
               e.preventDefault();
               const fd = new FormData(e.currentTarget);
               const updated: RelayNode = {
@@ -1643,11 +1688,13 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
                 adminToken: (fd.get('adminToken') as string).trim(),
               };
               if (!updated.name || !updated.url) return;
+              const token = await fetchToken();
+              await saveRelayNodeToServer(updated, gatewayRelay, token);
               const existing = relayNodes.findIndex((n) => n.id === editingRelay.id);
               const next = existing >= 0
                 ? relayNodes.map((n) => n.id === editingRelay.id ? updated : n)
                 : [...relayNodes, updated];
-              updateRelayNodes(next);
+              await updateRelayNodes(next);
               setSelectedRelayId(updated.id);
               setEditingRelay(null);
               setRelayState(null);
@@ -1681,9 +1728,11 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
                   <div className="flex items-center gap-2 shrink-0">
                     <button onClick={() => setEditingRelay(n)} className="px-2 py-1 border border-cyan-900/50 text-[10px] text-cyan-500 hover:text-cyan-300 transition-colors"><Pencil className="w-3 h-3" /></button>
                     {relayNodes.length > 1 && (
-                      <button onClick={() => {
+                      <button onClick={async () => {
+                        const token = await fetchToken();
+                        await deleteRelayNodeFromServer(n.id, gatewayRelay, token);
                         const next = relayNodes.filter((x) => x.id !== n.id);
-                        updateRelayNodes(next);
+                        await updateRelayNodes(next);
                         if (selectedRelayId === n.id) { setSelectedRelayId(next[0].id); setRelayState(null); }
                       }} className="px-2 py-1 border border-rose-900/50 text-[10px] text-rose-500 hover:text-rose-300 transition-colors"><Trash2 className="w-3 h-3" /></button>
                     )}
