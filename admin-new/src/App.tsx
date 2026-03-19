@@ -374,7 +374,13 @@ function buildClientConnectUrl(state: RelayState | null, channel: RelayChannel, 
   const base = normalizeBaseUrl(state?.publicBaseUrl) || window.location.origin;
   const wsBase = httpToWs(base);
   const serverUrl = `${wsBase}/client?channelId=${encodeURIComponent(channel.channelId)}&token=${encodeURIComponent(user.token)}${user.chatId ? `&chatId=${encodeURIComponent(user.chatId)}` : ''}`;
-  return `openclaw://connect?serverUrl=${encodeURIComponent(serverUrl)}`;
+  const params = new URLSearchParams();
+  params.set('serverUrl', serverUrl);
+  if (user.senderId) params.set('senderId', user.senderId);
+  if (channel.label || channel.channelId) params.set('displayName', `${channel.label || channel.channelId}/${user.senderId || 'user'}`);
+  if (channel.label) params.set('channelName', channel.label);
+  if (channel.channelId) params.set('channelId', channel.channelId);
+  return `openclaw://connect?${params.toString()}`;
 }
 
 function formatTimestamp(timestamp?: number) {
@@ -643,6 +649,18 @@ const UserConnectModal = ({
   return (
     <ModalShell title="CLIENT_CONNECTION_PARAMS" icon={QrCode} accent="fuchsia" onClose={onClose} maxWidth="max-w-lg">
       <div className="p-6 flex flex-col items-center gap-6 bg-black/40 overflow-y-auto">
+        {/* Connection summary */}
+        <div className="w-full grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs border border-fuchsia-900/30 bg-black/30 p-3 rounded">
+          <span className="text-fuchsia-700 font-mono">NODE</span>
+          <span className="text-fuchsia-300 font-mono">{channel.label || channel.channelId}</span>
+          <span className="text-fuchsia-700 font-mono">USER</span>
+          <span className="text-fuchsia-300 font-mono">{user.senderId}</span>
+          <span className="text-fuchsia-700 font-mono">CHANNEL_ID</span>
+          <span className="text-fuchsia-300 font-mono">{channel.channelId}</span>
+          <span className="text-fuchsia-700 font-mono">TOKEN</span>
+          <span className="text-fuchsia-300 font-mono">{user.token.slice(0, 8)}…{user.token.slice(-4)}</span>
+        </div>
+
         <div className="p-4 bg-white rounded-lg shadow-[0_0_30px_rgba(255,255,255,0.1)]">
           <QRCodeImage value={connectionUrl} size={180} />
         </div>
