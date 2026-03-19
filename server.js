@@ -71,8 +71,15 @@ function parseRequestUrl(requestUrl) {
   }
 }
 
+const CORS_HEADERS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "access-control-allow-headers": "content-type, authorization, x-relay-admin-token",
+  "access-control-max-age": "86400",
+};
+
 function writeJson(response, statusCode, payload) {
-  response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
+  response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8", ...CORS_HEADERS });
   response.end(JSON.stringify(payload));
 }
 
@@ -660,6 +667,13 @@ async function handleDeleteUser(response, channelId, senderId) {
 server.on("request", async (request, response) => {
   const url = parseRequestUrl(request.url || "/");
   const pathname = url.pathname;
+
+  // CORS preflight
+  if (request.method === "OPTIONS") {
+    response.writeHead(204, CORS_HEADERS);
+    response.end();
+    return;
+  }
 
   if (pathname === "/healthz") {
     writeJson(response, 200, {

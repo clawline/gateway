@@ -278,6 +278,30 @@ const LOGTO_APP_ID = 'anbr9zjc6bgd8099ecnx3';
 const GATEWAY_NAME = 'CLAWLINE_GATEWAY';
 const GATEWAY_VERSION = 'LIVE';
 
+// ── Multi-Relay Registry ──────────────────────────────────────
+type RelayNode = {
+  id: string;
+  name: string;
+  url: string;       // e.g. "https://relay.restry.cn"
+  adminToken: string; // sent as x-relay-admin-token header
+};
+
+const RELAY_REGISTRY_KEY = 'relay-registry';
+const DEFAULT_RELAY: RelayNode = { id: 'default', name: 'relay.restry.cn', url: 'https://relay.restry.cn', adminToken: '' };
+
+function loadRelayRegistry(): RelayNode[] {
+  try {
+    const raw = localStorage.getItem(RELAY_REGISTRY_KEY);
+    if (!raw) return [DEFAULT_RELAY];
+    const parsed = JSON.parse(raw) as RelayNode[];
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : [DEFAULT_RELAY];
+  } catch { return [DEFAULT_RELAY]; }
+}
+
+function saveRelayRegistry(nodes: RelayNode[]) {
+  localStorage.setItem(RELAY_REGISTRY_KEY, JSON.stringify(nodes));
+}
+
 
 class ApiError extends Error {
   status: number;
@@ -439,14 +463,18 @@ async function parseApiError(response: Response) {
   return `${response.status} ${response.statusText}`.trim();
 }
 
-async function apiFetch<T>(path: string, accessToken: string, init?: RequestInit) {
+async function apiFetch<T>(path: string, relay: RelayNode, init?: RequestInit) {
   const headers = new Headers(init?.headers);
-  headers.set('Authorization', `Bearer ${accessToken}`);
+  // Use relay admin token (x-relay-admin-token) for cross-origin relay auth
+  if (relay.adminToken) {
+    headers.set('x-relay-admin-token', relay.adminToken);
+  }
   if (init?.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
 
-  const response = await fetch(path, {
+  const url = `${relay.url.replace(/\/+$/, '')}${path}`;
+  const response = await fetch(url, {
     ...init,
     headers,
   });
@@ -1200,16 +1228,27 @@ export default function App() {
     }
   };
 
-  return <AdminDashboard logtoUser={logtoUser} onLogtoSignOut={() => void signOut(window.location.origin)} getAccessToken={getAccessTokenSafe} />;
+  return <AdminDashboard logtoUser={logtoUser} onLogtoSignOut={() => void signOut(window.location.origin)} />;
 }
 
-function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUser: IdTokenClaims | null; onLogtoSignOut: () => void; getAccessToken: (resource?: string) => Promise<string> }) {
+function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaims | null; onLogtoSignOut: () => void }) {
   const [dashboardError, setDashboardError] = useState<string | null>(null);
   const [relayState, setRelayState] = useState<RelayState | null>(null);
   const [time, setTime] = useState(new Date().toISOString());
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  const fetchToken = () => getAccessToken(LOGTO_API_RESOURCE);
+  // ── Multi-Relay state ──────────────────────────────────────
+  const [relayNodes, setRelayNodes] = useState<RelayNode[]>(() => loadRelayRegistry());
+  const [selectedRelayId, setSelectedRelayId] = useState<string>(relayNodes[0]?.id ?? 'default');
+  const [isRelaySettingsOpen, setIsRelaySettingsOpen] = useState(false);
+  const [editingRelay, setEditingRelay] = useState<RelayNode | null>(null);
+
+  const activeRelay = relayNodes.find((n) => n.id === selectedRelayId) ?? relayNodes[0] ?? DEFAULT_RELAY;
+
+  const updateRelayNodes = (next: RelayNode[]) => {
+    setRelayNodes(next);
+    saveRelayRegistry(next);
+  };
 
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
   const [configChannelId, setConfigChannelId] = useState<string | null>(null);
@@ -1296,7 +1335,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
     }
 
     try {
-      const nextState = await apiFetch<RelayState>('/api/state', await fetchToken());
+      const nextState = await apiFetch<RelayState>('/api/state', activeRelay);
       setRelayState(nextState);
       setDashboardError(null);
       return nextState;
@@ -1320,7 +1359,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
 
   useEffect(() => {
     void refreshState();
-  }, []);
+  }, [selectedRelayId]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -1350,7 +1389,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
     setDiagLines([]);
 
     try {
-      const nextState = await apiFetch<RelayState>('/api/state', await fetchToken());
+      const nextState = await apiFetch<RelayState>('/api/state', activeRelay);
       setRelayState(nextState);
       setDiagLines(buildDiagnosticLines(nextState));
     } catch (error) {
@@ -1370,7 +1409,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
     const trimmedId = values.channelId.trim();
 
     try {
-      await apiFetch('/api/channels', await fetchToken(), {
+      await apiFetch('/api/channels', activeRelay, {
         method: 'POST',
         body: JSON.stringify({
           channelId: trimmedId,
@@ -1413,7 +1452,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
     const trimmedSenderId = values.senderId.trim();
 
     try {
-      await apiFetch(`/api/channels/${encodeURIComponent(selectedChannel.channelId)}/users`, await fetchToken(), {
+      await apiFetch(`/api/channels/${encodeURIComponent(selectedChannel.channelId)}/users`, activeRelay, {
         method: 'POST',
         body: JSON.stringify({
           senderId: trimmedSenderId,
@@ -1450,7 +1489,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
   };
 
   const deleteChannel = async (channel: RelayChannel) => {
-    await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}`, await fetchToken(), {
+    await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}`, activeRelay, {
       method: 'DELETE',
     });
     if (selectedChannelId === channel.channelId) {
@@ -1461,7 +1500,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
   };
 
   const deleteUser = async (channel: RelayChannel, user: RelayUser) => {
-    await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}/users/${encodeURIComponent(user.senderId)}`, await fetchToken(), {
+    await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}/users/${encodeURIComponent(user.senderId)}`, activeRelay, {
       method: 'DELETE',
     });
     await refreshState({ silent: true });
@@ -1502,10 +1541,9 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
     });
   };
 
-  const gatewayEndpoint = buildGatewayEndpoint(relayState);
-  // Derive backend WS endpoint from publicBaseUrl (https→wss), NOT from pluginBackendUrl
-  // which may be a localhost address only reachable from the server itself.
-  const backendEndpoint = `${httpToWs(normalizeBaseUrl(relayState?.publicBaseUrl) || window.location.origin)}/backend`;
+  const gatewayEndpoint = activeRelay.url || buildGatewayEndpoint(relayState);
+  // Derive backend WS endpoint from active relay URL (https→wss)
+  const backendEndpoint = `${httpToWs(activeRelay.url || normalizeBaseUrl(relayState?.publicBaseUrl) || window.location.origin)}/backend`;
   const gatewayStatus = relayState && relayState.channels.length > 0 && relayState.stats.backendCount === 0 ? 'DEGRADED' : 'RUNNING';
 
   return (
@@ -1527,6 +1565,27 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
           <div className="flex items-center gap-2">
             <div className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_10px_#10b981]" />
             <span className="font-mono text-xs text-emerald-500 tracking-wider">GATEWAY ONLINE</span>
+          </div>
+          <div className="h-6 w-px bg-cyan-900/50" />
+          {/* ── Relay Selector ── */}
+          <div className="flex items-center gap-2">
+            <Server className="w-3.5 h-3.5 text-fuchsia-400" />
+            <select
+              value={selectedRelayId}
+              onChange={(e) => { setSelectedRelayId(e.target.value); setRelayState(null); }}
+              className="bg-black/60 border border-fuchsia-900/50 text-fuchsia-300 font-mono text-xs px-2 py-1 focus:outline-none focus:border-fuchsia-500 cursor-pointer"
+            >
+              {relayNodes.map((n) => (
+                <option key={n.id} value={n.id}>{n.name}</option>
+              ))}
+            </select>
+            <button
+              onClick={() => setIsRelaySettingsOpen(true)}
+              className="px-2 py-1 border border-fuchsia-900/50 text-fuchsia-500 hover:text-fuchsia-300 hover:border-fuchsia-700 transition-all text-xs"
+              title="Manage relays"
+            >
+              <Settings className="w-3 h-3" />
+            </button>
           </div>
         </div>
 
@@ -1561,6 +1620,78 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
           <span className="text-cyan-400">{time}</span>
         </div>
       </header>
+
+      {/* ── Relay Settings Modal ── */}
+      {isRelaySettingsOpen && (
+        <ModalShell title="RELAY_NODES" icon={Server} onClose={() => { setIsRelaySettingsOpen(false); setEditingRelay(null); }}>
+          {editingRelay ? (
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              const fd = new FormData(e.currentTarget);
+              const updated: RelayNode = {
+                id: editingRelay.id || (fd.get('name') as string).toLowerCase().replace(/[^a-z0-9-]/g, '-') || randomToken().slice(0, 8),
+                name: (fd.get('name') as string).trim(),
+                url: (fd.get('url') as string).trim().replace(/\/+$/, ''),
+                adminToken: (fd.get('adminToken') as string).trim(),
+              };
+              if (!updated.name || !updated.url) return;
+              const existing = relayNodes.findIndex((n) => n.id === editingRelay.id);
+              const next = existing >= 0
+                ? relayNodes.map((n) => n.id === editingRelay.id ? updated : n)
+                : [...relayNodes, updated];
+              updateRelayNodes(next);
+              setSelectedRelayId(updated.id);
+              setEditingRelay(null);
+              setRelayState(null);
+            }} className="space-y-4">
+              <div>
+                <label className={labelClassName}>NAME</label>
+                <input name="name" defaultValue={editingRelay.name} className={inputClassName} required />
+              </div>
+              <div>
+                <label className={labelClassName}>URL</label>
+                <input name="url" defaultValue={editingRelay.url} placeholder="https://relay.example.com" className={inputClassName} required />
+              </div>
+              <div>
+                <label className={labelClassName}>ADMIN_TOKEN</label>
+                <input name="adminToken" type="password" defaultValue={editingRelay.adminToken} className={inputClassName} />
+              </div>
+              <div className="flex justify-end gap-3 pt-2">
+                <button type="button" onClick={() => setEditingRelay(null)} className="px-4 py-2 border border-cyan-900/50 text-cyan-600 hover:text-cyan-300 transition-colors">CANCEL</button>
+                <button type="submit" className="px-4 py-2 bg-cyan-950/50 border border-cyan-700 text-cyan-300 hover:bg-cyan-900 transition-colors">SAVE</button>
+              </div>
+            </form>
+          ) : (
+            <div className="space-y-3">
+              {relayNodes.map((n) => (
+                <div key={n.id} className={cn('px-4 py-3 border font-mono flex items-center justify-between gap-4', n.id === selectedRelayId ? 'border-fuchsia-500/50 bg-fuchsia-950/20' : 'border-cyan-900/30 bg-black/40')}>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-cyan-200 font-bold truncate">{n.name}</div>
+                    <div className="text-[10px] text-cyan-600 truncate">{n.url}</div>
+                    <div className="text-[10px] text-cyan-700">{n.adminToken ? '●●●●●●●●' : 'NO_TOKEN'}</div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button onClick={() => setEditingRelay(n)} className="px-2 py-1 border border-cyan-900/50 text-[10px] text-cyan-500 hover:text-cyan-300 transition-colors"><Pencil className="w-3 h-3" /></button>
+                    {relayNodes.length > 1 && (
+                      <button onClick={() => {
+                        const next = relayNodes.filter((x) => x.id !== n.id);
+                        updateRelayNodes(next);
+                        if (selectedRelayId === n.id) { setSelectedRelayId(next[0].id); setRelayState(null); }
+                      }} className="px-2 py-1 border border-rose-900/50 text-[10px] text-rose-500 hover:text-rose-300 transition-colors"><Trash2 className="w-3 h-3" /></button>
+                    )}
+                  </div>
+                </div>
+              ))}
+              <button
+                onClick={() => setEditingRelay({ id: '', name: '', url: '', adminToken: '' })}
+                className="w-full py-3 border border-dashed border-fuchsia-800 text-fuchsia-600 font-mono text-xs hover:bg-fuchsia-950/30 hover:text-fuchsia-400 transition-all flex items-center justify-center gap-2"
+              >
+                <Plus className="w-4 h-4" /> ADD_RELAY_NODE
+              </button>
+            </div>
+          )}
+        </ModalShell>
+      )}
 
       <DiagnosticModal isOpen={isDiagOpen} isLoading={isDiagLoading} lines={diagLines} onClose={() => setIsDiagOpen(false)} />
       <AppDialogModal
