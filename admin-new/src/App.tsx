@@ -463,11 +463,14 @@ async function parseApiError(response: Response) {
   return `${response.status} ${response.statusText}`.trim();
 }
 
-async function apiFetch<T>(path: string, relay: RelayNode, init?: RequestInit) {
+async function apiFetch<T>(path: string, relay: RelayNode, init?: RequestInit, accessToken?: string) {
   const headers = new Headers(init?.headers);
-  // Use relay admin token (x-relay-admin-token) for cross-origin relay auth
+  // Dual auth: relay admin token + Logto JWT Bearer
   if (relay.adminToken) {
     headers.set('x-relay-admin-token', relay.adminToken);
+  }
+  if (accessToken) {
+    headers.set('Authorization', `Bearer ${accessToken}`);
   }
   if (init?.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
@@ -1228,10 +1231,10 @@ export default function App() {
     }
   };
 
-  return <AdminDashboard logtoUser={logtoUser} onLogtoSignOut={() => void signOut(window.location.origin)} />;
+  return <AdminDashboard logtoUser={logtoUser} onLogtoSignOut={() => void signOut(window.location.origin)} getAccessToken={getAccessTokenSafe} />;
 }
 
-function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaims | null; onLogtoSignOut: () => void }) {
+function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUser: IdTokenClaims | null; onLogtoSignOut: () => void; getAccessToken: (resource?: string) => Promise<string> }) {
   const [dashboardError, setDashboardError] = useState<string | null>(null);
   const [relayState, setRelayState] = useState<RelayState | null>(null);
   const [time, setTime] = useState(new Date().toISOString());
@@ -1244,6 +1247,11 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
   const [editingRelay, setEditingRelay] = useState<RelayNode | null>(null);
 
   const activeRelay = relayNodes.find((n) => n.id === selectedRelayId) ?? relayNodes[0] ?? DEFAULT_RELAY;
+
+  // Fetch Logto JWT for relays that need it (e.g. gateway.clawlines.net)
+  const fetchToken = async (): Promise<string | undefined> => {
+    try { return await getAccessToken(LOGTO_API_RESOURCE); } catch { return undefined; }
+  };
 
   const updateRelayNodes = (next: RelayNode[]) => {
     setRelayNodes(next);
@@ -1335,7 +1343,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
     }
 
     try {
-      const nextState = await apiFetch<RelayState>('/api/state', activeRelay);
+      const nextState = await apiFetch<RelayState>('/api/state', activeRelay, undefined, await fetchToken());
       setRelayState(nextState);
       setDashboardError(null);
       return nextState;
@@ -1389,7 +1397,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
     setDiagLines([]);
 
     try {
-      const nextState = await apiFetch<RelayState>('/api/state', activeRelay);
+      const nextState = await apiFetch<RelayState>('/api/state', activeRelay, undefined, await fetchToken());
       setRelayState(nextState);
       setDiagLines(buildDiagnosticLines(nextState));
     } catch (error) {
@@ -1416,7 +1424,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
           label: values.label.trim() || undefined,
           secret: values.secret.trim() || undefined,
         }),
-      });
+      }, await fetchToken());
       // Show ✓ feedback on button for 800ms
       setChannelSubmitSuccess(true);
       // Refresh data WHILE showing success (parallel)
@@ -1466,7 +1474,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
             : undefined,
           enabled: values.enabled,
         }),
-      });
+      }, await fetchToken());
       // Show ✓ feedback on button for 800ms
       setUserSubmitSuccess(true);
       // Refresh data WHILE showing success (parallel)
@@ -1491,7 +1499,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
   const deleteChannel = async (channel: RelayChannel) => {
     await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}`, activeRelay, {
       method: 'DELETE',
-    });
+    }, await fetchToken());
     if (selectedChannelId === channel.channelId) {
       setSelectedChannelId(null);
     }
@@ -1502,7 +1510,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: { logtoUser: IdTokenClaim
   const deleteUser = async (channel: RelayChannel, user: RelayUser) => {
     await apiFetch(`/api/channels/${encodeURIComponent(channel.channelId)}/users/${encodeURIComponent(user.senderId)}`, activeRelay, {
       method: 'DELETE',
-    });
+    }, await fetchToken());
     await refreshState({ silent: true });
     addToast('USER_REMOVED ✓', 'success');
   };
