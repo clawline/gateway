@@ -72,6 +72,14 @@ const Hexagon = (props: IconProps) => (
   </IconBase>
 );
 
+const AlertCircle = (props: IconProps) => (
+  <IconBase {...props}>
+    <circle cx="12" cy="12" r="10" />
+    <line x1="12" x2="12" y1="8" y2="12" />
+    <line x1="12" x2="12.01" y1="16" y2="16" />
+  </IconBase>
+);
+
 const Lock = (props: IconProps) => (
   <IconBase {...props}>
     <rect x="5" y="11" width="14" height="10" rx="2" />
@@ -865,11 +873,15 @@ const AppDialogModal = ({
             onClick={onConfirm}
             disabled={isSubmitting}
             className={cn(
-              'px-4 py-2 border transition-colors disabled:opacity-60 disabled:cursor-not-allowed',
+              'min-h-[44px] px-4 py-2 border transition-colors disabled:opacity-60 disabled:cursor-not-allowed',
               primaryButtonClass,
             )}
           >
-            {isSubmitting ? 'PROCESSING...' : state.confirmLabel ?? (isConfirm ? 'CONFIRM' : 'OK')}
+            {isSubmitting ? (
+              <span className="flex items-center gap-1.5">
+                <RefreshCw className="w-4 h-4 animate-spin" /> Processing...
+              </span>
+            ) : state.confirmLabel ?? (isConfirm ? 'Confirm' : 'OK')}
           </button>
         </div>
       </div>
@@ -1015,7 +1027,15 @@ const ChannelFormModal = ({
             )}
             disabled={isSubmitting || submitSuccess}
           >
-            {submitSuccess ? '✓ CREATED' : isSubmitting ? 'SAVING...' : isEditing ? 'UPDATE_NODE' : 'CREATE_NODE'}
+            {submitSuccess ? (
+              <span className="flex items-center gap-1.5">
+                <Check className="w-4 h-4 text-emerald-400" /> Saved
+              </span>
+            ) : isSubmitting ? (
+              <span className="flex items-center gap-1.5">
+                <RefreshCw className="w-4 h-4 animate-spin" /> Saving...
+              </span>
+            ) : isEditing ? 'Update' : 'Create'}
           </button>
         </div>
       </form>
@@ -1184,7 +1204,15 @@ const UserFormModal = ({
             )}
             disabled={isSubmitting || submitSuccess}
           >
-            {submitSuccess ? '✓ CREATED' : isSubmitting ? 'SAVING...' : isEditing ? 'UPDATE_USER' : 'CREATE_USER'}
+            {submitSuccess ? (
+              <span className="flex items-center gap-1.5">
+                <Check className="w-4 h-4 text-emerald-400" /> Saved
+              </span>
+            ) : isSubmitting ? (
+              <span className="flex items-center gap-1.5">
+                <RefreshCw className="w-4 h-4 animate-spin" /> Saving...
+              </span>
+            ) : isEditing ? 'Update' : 'Add'}
           </button>
         </div>
       </form>
@@ -1493,11 +1521,11 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
           secret: values.secret.trim() || undefined,
         }),
       }, await fetchToken());
-      // Show ✓ feedback on button for 800ms
+      // Show ✓ feedback on button for 600ms
       setChannelSubmitSuccess(true);
       // Refresh data WHILE showing success (parallel)
       const refreshPromise = refreshState({ silent: true });
-      await new Promise((r) => setTimeout(r, 800));
+      await new Promise((r) => setTimeout(r, 600));
       await refreshPromise;
       // NOW close dialog — data is already refreshed
       setChannelModalState(null);
@@ -1505,7 +1533,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
       setSelectedChannelId(trimmedId);
       setHighlightChannelId(trimmedId);
       setTimeout(() => setHighlightChannelId(null), 2500);
-      addToast(isEdit ? 'NODE_UPDATED ✓' : 'NODE_REGISTERED ✓', 'success');
+      addToast(isEdit ? 'Channel updated' : 'Channel created', 'success');
     } catch (error) {
       setChannelSubmitSuccess(false);
       setChannelFormError(error instanceof Error ? error.message : 'failed to save channel');
@@ -1543,18 +1571,18 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
           enabled: values.enabled,
         }),
       }, await fetchToken());
-      // Show ✓ feedback on button for 800ms
+      // Show ✓ feedback on button for 600ms
       setUserSubmitSuccess(true);
       // Refresh data WHILE showing success (parallel)
       const refreshPromise = refreshState({ silent: true });
-      await new Promise((r) => setTimeout(r, 800));
+      await new Promise((r) => setTimeout(r, 600));
       await refreshPromise;
       // NOW close dialog — data is already refreshed
       setUserModalState(null);
       setUserSubmitSuccess(false);
       setHighlightUserId(trimmedSenderId);
       setTimeout(() => setHighlightUserId(null), 2500);
-      addToast(isEdit ? 'USER_UPDATED ✓' : 'USER_ADDED ✓', 'success');
+      addToast(isEdit ? 'User updated' : 'User added', 'success');
     } catch (error) {
       setUserSubmitSuccess(false);
       setUserFormError(error instanceof Error ? error.message : 'failed to save user');
@@ -1572,7 +1600,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
       setSelectedChannelId(null);
     }
     await refreshState({ silent: true });
-    addToast('CHANNEL_DELETED ✓', 'success');
+    addToast('Channel deleted', 'success');
   };
 
   const deleteUser = async (channel: RelayChannel, user: RelayUser) => {
@@ -1580,7 +1608,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
       method: 'DELETE',
     }, await fetchToken());
     await refreshState({ silent: true });
-    addToast('USER_REMOVED ✓', 'success');
+    addToast('User removed', 'success');
   };
 
   const handleDeleteChannel = (channel: RelayChannel) => {
@@ -1811,15 +1839,16 @@ function AdminDashboard({ logtoUser, onLogtoSignOut, getAccessToken }: { logtoUs
           <div
             key={t.id}
             className={cn(
-              'pointer-events-auto px-4 py-2 text-xs tracking-widest border backdrop-blur-sm animate-[fadeSlideIn_0.3s_ease-out]',
+              'pointer-events-auto px-4 py-2.5 text-sm border backdrop-blur-sm animate-[fadeSlideIn_0.3s_ease-out] rounded shadow-lg',
               t.type === 'success'
-                ? 'bg-cyan-950/80 border-cyan-500/50 text-cyan-300'
-                : 'bg-rose-950/80 border-rose-500/50 text-rose-300',
+                ? 'bg-emerald-950/90 border-emerald-500/50 text-emerald-300'
+                : 'bg-rose-950/90 border-rose-500/50 text-rose-300',
             )}
           >
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              {t.type === 'success' ? <Check className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />}
               <span>{t.message}</span>
-              <button onClick={() => removeToast(t.id)} className="text-zinc-500 hover:text-zinc-300">×</button>
+              <button onClick={() => removeToast(t.id)} className="ml-2 opacity-50 hover:opacity-100 transition-opacity">×</button>
             </div>
           </div>
         ))}
