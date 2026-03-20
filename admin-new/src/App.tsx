@@ -493,9 +493,9 @@ async function parseApiError(response: Response) {
 
 async function apiFetch<T>(path: string, relay: RelayNode, init?: RequestInit, accessToken?: string) {
   const headers = new Headers(init?.headers);
-  // Dual auth: relay admin token + Logto JWT Bearer
+  // Dual auth: API key (fast) + Logto JWT Bearer (fallback)
   if (relay.adminToken) {
-    headers.set('x-relay-admin-token', relay.adminToken);
+    headers.set('x-api-key', relay.adminToken);
   }
   if (accessToken) {
     headers.set('Authorization', `Bearer ${accessToken}`);
