@@ -475,6 +475,7 @@ backendWss.on("connection", (ws) => {
     }
 
     if (frame?.type === "relay.server.event") {
+      console.log(`[relay] ← backend ${boundChannelId} sending event to client ${frame.connectionId}: ${frame.event?.type || 'unknown'}`);
       const client = clientConnections.get(frame.connectionId);
       if (!client || client.channelId !== boundChannelId) {
         return;
@@ -591,6 +592,7 @@ clientWss.on("connection", (ws, request) => {
       return;
     }
 
+    console.log(`[relay] → forwarding client event to backend ${channelId}: ${event?.type || 'unknown'}`);
     sendJson(currentBackend.ws, {
       type: "relay.client.event",
       connectionId,
@@ -928,10 +930,20 @@ server.on("request", async (request, response) => {
     const channelSecret = normalizeNonEmpty(request.headers["x-channel-secret"]);
     let authed = headerToken === adminToken || queryToken === adminToken;
     if (!authed && await verifyBearerToken(request)) authed = true;
+    // Allow channel user tokens (Bearer or query) to upload
+    if (!authed) {
+      const bearer = normalizeNonEmpty(request.headers["authorization"]?.replace(/^Bearer\s+/, ""));
+      const token = queryToken || bearer;
+      if (token) {
+        const cfg = await relayStore.loadConfig();
+        if (Object.values(cfg?.channels || {}).some(ch => ch.users?.some(u => u.token === token))) {
+          authed = true;
+        }
+      }
+    }
     if (!authed && channelSecret) {
-      // Validate channel secret against any registered channel
-      const relayConfig = await relayStore.load();
-      authed = (relayConfig?.channels || []).some(ch => ch.secret === channelSecret);
+      const relayConfig = await relayStore.loadConfig();
+      authed = Object.values(relayConfig?.channels || {}).some(ch => ch.secret === channelSecret);
     }
     if (!authed) {
       writeJson(response, 401, { ok: false, error: "auth required" });
