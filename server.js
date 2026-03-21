@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { readFile, access } from "node:fs/promises";
+import { readFile, writeFile, mkdir, access, unlink, readdir, stat } from "node:fs/promises";
 import { dirname, join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
@@ -31,6 +31,40 @@ const adminToken = normalizeNonEmpty(process.env.RELAY_ADMIN_TOKEN) || (() => {
   return generated;
 })();
 const publicBaseUrl = normalizeNonEmpty(process.env.RELAY_PUBLIC_BASE_URL);
+
+// ── Media upload/download ──
+const mediaDir = join(baseDir, "media");
+const MEDIA_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+const MEDIA_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const MEDIA_MIME_MAP = {
+  ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+  ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+  ".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".wav": "audio/wav",
+  ".mp4": "video/mp4", ".webm": "video/webm", ".pdf": "application/pdf",
+};
+
+// Ensure media directory exists
+await mkdir(mediaDir, { recursive: true });
+
+// Periodic cleanup of expired media files (runs every hour)
+setInterval(async () => {
+  try {
+    const files = await readdir(mediaDir);
+    const now = Date.now();
+    for (const file of files) {
+      try {
+        const filePath = join(mediaDir, file);
+        const fileStat = await stat(filePath);
+        if (now - fileStat.mtimeMs > MEDIA_TTL_MS) {
+          await unlink(filePath);
+          console.log(`[media] cleaned up expired file: ${file}`);
+        }
+      } catch {}
+    }
+  } catch (err) {
+    console.error("[media] cleanup error:", err);
+  }
+}, 60 * 60 * 1000);
 
 // Logto JWT verification
 const logtoEndpoint = normalizeNonEmpty(process.env.LOGTO_ENDPOINT) || "https://logto.dr.restry.cn";
@@ -219,6 +253,53 @@ async function parseJsonBody(request) {
     });
     request.on("error", reject);
   });
+}
+
+// ── Media helpers ──
+function parseRawBody(request, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let totalLength = 0;
+    request.on("data", (chunk) => {
+      totalLength += chunk.length;
+      if (totalLength > maxBytes) {
+        reject(new Error("payload too large"));
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on("end", () => resolve(Buffer.concat(chunks)));
+    request.on("error", reject);
+  });
+}
+
+function inferMimeFromName(name) {
+  const ext = "." + (name.split(".").pop() || "").toLowerCase();
+  return MEDIA_MIME_MAP[ext] || "application/octet-stream";
+}
+
+function parseMultipart(buffer, boundary) {
+  const str = buffer.toString("binary");
+  const parts = str.split(`--${boundary}`);
+  for (const part of parts) {
+    if (part.trim() === "" || part.trim() === "--") continue;
+    const headerEnd = part.indexOf("\r\n\r\n");
+    if (headerEnd === -1) continue;
+    const headers = part.substring(0, headerEnd);
+    if (!headers.includes("filename=")) continue;
+    const filenameMatch = headers.match(/filename="([^"]+)"/);
+    const ctMatch = headers.match(/Content-Type:\s*(\S+)/i);
+    const body = part.substring(headerEnd + 4);
+    // Remove trailing \r\n
+    const cleanBody = body.endsWith("\r\n") ? body.slice(0, -2) : body;
+    return {
+      buffer: Buffer.from(cleanBody, "binary"),
+      filename: filenameMatch?.[1] || "file",
+      contentType: ctMatch?.[1] || null,
+    };
+  }
+  return null;
 }
 
 function isClientInputError(error) {
@@ -836,6 +917,105 @@ server.on("request", async (request, response) => {
     const channelId = decodeURIComponent(userMatch[1]);
     const senderId = decodeURIComponent(userMatch[2]);
     await handleDeleteUser(response, channelId, senderId);
+    return;
+  }
+
+  // ── Media upload (POST /api/media/upload) ──
+  if (pathname === "/api/media/upload" && request.method === "POST") {
+    // Auth: admin token, channel backend secret, or Logto JWT
+    const headerToken = normalizeNonEmpty(request.headers["x-relay-admin-token"]);
+    const queryToken = normalizeNonEmpty(url.searchParams.get("adminToken"));
+    const channelSecret = normalizeNonEmpty(request.headers["x-channel-secret"]);
+    let authed = headerToken === adminToken || queryToken === adminToken;
+    if (!authed && await verifyBearerToken(request)) authed = true;
+    if (!authed && channelSecret) {
+      // Validate channel secret against any registered channel
+      const relayConfig = await relayStore.load();
+      authed = (relayConfig?.channels || []).some(ch => ch.secret === channelSecret);
+    }
+    if (!authed) {
+      writeJson(response, 401, { ok: false, error: "auth required" });
+      return;
+    }
+
+    try {
+      const contentType = request.headers["content-type"] || "";
+      let fileBuffer;
+      let originalName = "file";
+      let fileMime = "application/octet-stream";
+
+      if (contentType.includes("multipart/form-data")) {
+        // Parse multipart — read raw body and extract first file part
+        const raw = await parseRawBody(request, MEDIA_MAX_BYTES);
+        const boundary = contentType.split("boundary=")[1]?.trim();
+        if (!boundary) { writeJson(response, 400, { ok: false, error: "missing boundary" }); return; }
+        const parsed = parseMultipart(raw, boundary);
+        if (!parsed) { writeJson(response, 400, { ok: false, error: "no file in multipart body" }); return; }
+        fileBuffer = parsed.buffer;
+        originalName = parsed.filename || "file";
+        fileMime = parsed.contentType || inferMimeFromName(originalName);
+      } else if (contentType.includes("application/json")) {
+        // JSON body with base64: { data: "base64...", filename?: "...", mimeType?: "..." }
+        const raw = await parseRawBody(request, MEDIA_MAX_BYTES * 1.4); // base64 overhead
+        const body = JSON.parse(raw.toString("utf-8"));
+        if (!body.data) { writeJson(response, 400, { ok: false, error: "missing data field" }); return; }
+        const base64 = body.data.replace(/^data:[^;]+;base64,/, "");
+        fileBuffer = Buffer.from(base64, "base64");
+        originalName = body.filename || "file";
+        fileMime = body.mimeType || inferMimeFromName(originalName);
+      } else {
+        // Raw binary upload
+        fileBuffer = await parseRawBody(request, MEDIA_MAX_BYTES);
+        originalName = url.searchParams.get("filename") || "file";
+        fileMime = contentType || inferMimeFromName(originalName);
+      }
+
+      if (fileBuffer.length > MEDIA_MAX_BYTES) {
+        writeJson(response, 413, { ok: false, error: `file too large (max ${MEDIA_MAX_BYTES / 1024 / 1024}MB)` });
+        return;
+      }
+
+      const ext = originalName.includes(".") ? "." + originalName.split(".").pop().toLowerCase() : "";
+      const fileId = randomUUID();
+      const fileName = fileId + ext;
+      await writeFile(join(mediaDir, fileName), fileBuffer);
+
+      const baseUrl = publicBaseUrl || `${request.headers["x-forwarded-proto"] || "https"}://${request.headers.host}`;
+      const mediaUrl = `${baseUrl}/api/media/${fileName}`;
+
+      console.log(`[media] uploaded ${fileName} (${fileBuffer.length} bytes, ${fileMime})`);
+      writeJson(response, 200, { ok: true, id: fileId, fileName, url: mediaUrl, mimeType: fileMime, size: fileBuffer.length });
+    } catch (err) {
+      console.error("[media] upload error:", err);
+      if (err.message === "payload too large") {
+        writeJson(response, 413, { ok: false, error: `file too large (max ${MEDIA_MAX_BYTES / 1024 / 1024}MB)` });
+      } else {
+        writeJson(response, 500, { ok: false, error: String(err) });
+      }
+    }
+    return;
+  }
+
+  // ── Media download (GET /api/media/:filename) ──
+  const mediaMatch = pathname.match(/^\/api\/media\/([a-f0-9-]+(?:\.\w+)?)$/);
+  if (mediaMatch && request.method === "GET") {
+    const fileName = mediaMatch[1];
+    const filePath = join(mediaDir, fileName);
+    try {
+      await access(filePath);
+      const content = await readFile(filePath);
+      const ext = extname(fileName);
+      const mime = MEDIA_MIME_MAP[ext] || "application/octet-stream";
+      response.writeHead(200, {
+        "content-type": mime,
+        "content-length": content.length,
+        "cache-control": "public, max-age=86400",
+        "access-control-allow-origin": "*",
+      });
+      response.end(content);
+    } catch {
+      writeJson(response, 404, { ok: false, error: "file not found" });
+    }
     return;
   }
 
