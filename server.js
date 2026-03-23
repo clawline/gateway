@@ -1,7 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { readFile, writeFile, mkdir, access, unlink, readdir, stat } from "node:fs/promises";
-import { dirname, join, extname } from "node:path";
+import { dirname, join, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { createRemoteJWKSet, jwtVerify } from "jose";
@@ -73,9 +73,117 @@ const jwks = createRemoteJWKSet(new URL(`${logtoEndpoint}/oidc/jwks`));
 const pluginBackendUrl =
   normalizeNonEmpty(process.env.RELAY_PLUGIN_BACKEND_URL) || `ws://127.0.0.1:${port}/backend`;
 
+// ── Security: CORS allowlist (dynamic from config, env fallback) ──
+const envCorsOrigins = (() => {
+  const raw = normalizeNonEmpty(process.env.CORS_ALLOWED_ORIGINS);
+  if (!raw) return null;
+  return raw.split(",").map(o => o.trim()).filter(Boolean);
+})();
+
+function getCorsAllowedOrigins() {
+  // Dynamic config takes priority, then env var, then auto-derive from publicBaseUrl
+  const fromConfig = relayConfig?.settings?.corsAllowedOrigins;
+  if (fromConfig && fromConfig.length > 0) return fromConfig;
+  if (envCorsOrigins) return envCorsOrigins;
+  // Default: allow the public base URL origin if configured
+  if (publicBaseUrl) {
+    try { return [new URL(publicBaseUrl).origin]; } catch {}
+  }
+  return null; // same-origin only
+}
+
+function isOriginAllowed(origin) {
+  if (!origin) return true; // same-origin requests have no Origin header
+  const allowed = getCorsAllowedOrigins();
+  if (!allowed) return false; // no allowlist = same-origin only
+  return allowed.includes(origin);
+}
+
+// ── Security: timing-safe compare ──
+function safeCompare(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const bufA = Buffer.from(a, "utf8");
+  const bufB = Buffer.from(b, "utf8");
+  if (bufA.length !== bufB.length) {
+    // Compare against self to avoid timing leak on length
+    timingSafeEqual(bufA, bufA);
+    return false;
+  }
+  return timingSafeEqual(bufA, bufB);
+}
+
+// ── Security: per-IP rate limiting (token bucket) ──
+const httpRateLimits = new Map(); // ip -> { tokens, lastRefill }
+const HTTP_RATE_LIMIT = 100; // requests per minute
+const HTTP_RATE_INTERVAL = 60_000;
+
+function checkHttpRateLimit(ip) {
+  const now = Date.now();
+  let bucket = httpRateLimits.get(ip);
+  if (!bucket) {
+    bucket = { tokens: HTTP_RATE_LIMIT - 1, lastRefill: now };
+    httpRateLimits.set(ip, bucket);
+    return true;
+  }
+  const elapsed = now - bucket.lastRefill;
+  if (elapsed >= HTTP_RATE_INTERVAL) {
+    bucket.tokens = HTTP_RATE_LIMIT - 1;
+    bucket.lastRefill = now;
+    return true;
+  }
+  if (bucket.tokens > 0) {
+    bucket.tokens--;
+    return true;
+  }
+  return false;
+}
+
+// WebSocket per-connection message rate limiting
+const WS_MSG_RATE_LIMIT = 30; // messages per minute
+const WS_MSG_RATE_INTERVAL = 60_000;
+
+function checkWsMsgRateLimit(rateBucket) {
+  const now = Date.now();
+  if (now - rateBucket.lastRefill >= WS_MSG_RATE_INTERVAL) {
+    rateBucket.tokens = WS_MSG_RATE_LIMIT - 1;
+    rateBucket.lastRefill = now;
+    return true;
+  }
+  if (rateBucket.tokens > 0) {
+    rateBucket.tokens--;
+    return true;
+  }
+  return false;
+}
+
+// ── Security: per-IP connection limits ──
+const connectionsPerIp = new Map(); // ip -> count
+const MAX_CONNECTIONS_PER_IP = 50;
+
+function trackIpConnection(ip) {
+  const count = connectionsPerIp.get(ip) || 0;
+  if (count >= MAX_CONNECTIONS_PER_IP) return false;
+  connectionsPerIp.set(ip, count + 1);
+  return true;
+}
+
+function untrackIpConnection(ip) {
+  const count = connectionsPerIp.get(ip) || 0;
+  if (count <= 1) connectionsPerIp.delete(ip);
+  else connectionsPerIp.set(ip, count - 1);
+}
+
+// Periodic cleanup of rate limit buckets (every 5 min)
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, bucket] of httpRateLimits) {
+    if (now - bucket.lastRefill > HTTP_RATE_INTERVAL * 5) httpRateLimits.delete(ip);
+  }
+}, 5 * 60_000);
+
 const server = createServer();
-const backendWss = new WebSocketServer({ noServer: true });
-const clientWss = new WebSocketServer({ noServer: true });
+const backendWss = new WebSocketServer({ noServer: true, maxPayload: 10485760 });
+const clientWss = new WebSocketServer({ noServer: true, maxPayload: 10485760 });
 
 const backends = new Map();
 const backendPresence = new Map();
@@ -106,19 +214,33 @@ function parseRequestUrl(requestUrl) {
 }
 
 const CORS_HEADERS = {
-  "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
   "access-control-allow-headers": "content-type, authorization, x-relay-admin-token",
   "access-control-max-age": "86400",
 };
 
+const SECURITY_HEADERS = {
+  "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' wss:",
+  "strict-transport-security": "max-age=31536000; includeSubDomains",
+};
+
+function getCorsHeaders(origin) {
+  const headers = { ...CORS_HEADERS, ...SECURITY_HEADERS };
+  if (origin && isOriginAllowed(origin)) {
+    headers["access-control-allow-origin"] = origin;
+    headers["vary"] = "Origin";
+  }
+  return headers;
+}
+
 function writeJson(response, statusCode, payload) {
-  response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8", ...CORS_HEADERS });
+  const origin = response.req?.headers?.origin;
+  response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8", ...getCorsHeaders(origin) });
   response.end(JSON.stringify(payload));
 }
 
 function writeHtml(response, html) {
-  response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  response.writeHead(200, { "content-type": "text/html; charset=utf-8", ...SECURITY_HEADERS });
   response.end(html);
 }
 
@@ -214,7 +336,7 @@ async function requireAdmin(request, response, url) {
   // Legacy admin token (X-Relay-Admin-Token header or query param)
   const headerToken = normalizeNonEmpty(request.headers["x-relay-admin-token"]);
   const queryToken = normalizeNonEmpty(url.searchParams.get("adminToken"));
-  if (headerToken === adminToken || queryToken === adminToken) {
+  if (safeCompare(headerToken, adminToken) || safeCompare(queryToken, adminToken)) {
     return true;
   }
 
@@ -378,7 +500,7 @@ function authenticateClientConnection(channelConfig, url) {
     };
   }
 
-  const authUser = channelConfig.users.find((user) => user.enabled !== false && user.token === token);
+  const authUser = channelConfig.users.find((user) => user.enabled !== false && safeCompare(user.token, token));
   if (!authUser) {
     return {
       ok: false,
@@ -415,11 +537,16 @@ function extractRelayQuery(channelConfig, url) {
 
 backendWss.on("connection", (ws) => {
   let boundChannelId;
+  const rateBucket = { tokens: WS_MSG_RATE_LIMIT, lastRefill: Date.now() };
   let helloTimeout = setTimeout(() => {
     closeSocket(ws, 1008, "missing relay.backend.hello");
   }, 5000);
 
   ws.on("message", (raw) => {
+    if (!checkWsMsgRateLimit(rateBucket)) {
+      closeSocket(ws, 1008, "rate limit exceeded");
+      return;
+    }
     let frame;
     try {
       frame = JSON.parse(raw.toString());
@@ -439,7 +566,7 @@ backendWss.on("connection", (ws) => {
       const channelConfig = channelId ? getChannelConfig(channelId) : undefined;
       const expectedSecret = normalizeNonEmpty(channelConfig?.secret);
 
-      if (!channelId || !expectedSecret || !secret || secret !== expectedSecret) {
+      if (!channelId || !expectedSecret || !secret || !safeCompare(secret, expectedSecret)) {
         sendJson(ws, {
           type: "relay.backend.error",
           message: "backend auth failed",
@@ -562,6 +689,7 @@ clientWss.on("connection", (ws, request) => {
 
   const connectionId = randomUUID();
   const query = extractRelayQuery(channelConfig, url);
+  const clientRateBucket = { tokens: WS_MSG_RATE_LIMIT, lastRefill: Date.now() };
 
   clientConnections.set(connectionId, {
     ws,
@@ -578,6 +706,10 @@ clientWss.on("connection", (ws, request) => {
   });
 
   ws.on("message", (raw) => {
+    if (!checkWsMsgRateLimit(clientRateBucket)) {
+      closeClientConnection(connectionId, 1008, "rate limit exceeded");
+      return;
+    }
     const currentBackend = backends.get(channelId);
     if (!currentBackend || currentBackend.ws.readyState !== WebSocket.OPEN) {
       closeClientConnection(connectionId, 1012, "backend unavailable");
@@ -753,8 +885,16 @@ server.on("request", async (request, response) => {
 
   // CORS preflight
   if (request.method === "OPTIONS") {
-    response.writeHead(204, CORS_HEADERS);
+    const origin = request.headers.origin;
+    response.writeHead(204, getCorsHeaders(origin));
     response.end();
+    return;
+  }
+
+  // Per-IP HTTP rate limiting
+  const clientIp = request.headers["x-forwarded-for"]?.split(",")[0]?.trim() || request.socket.remoteAddress;
+  if (!checkHttpRateLimit(clientIp)) {
+    writeJson(response, 429, { ok: false, error: "rate limit exceeded" });
     return;
   }
 
@@ -797,6 +937,39 @@ server.on("request", async (request, response) => {
       return;
     }
     await handleAdminState(response);
+    return;
+  }
+
+  // ── Settings API (admin) ──
+  if (pathname === "/api/settings" && request.method === "GET") {
+    if (!(await requireAdmin(request, response, url))) return;
+    const config = await relayStore.loadConfig();
+    writeJson(response, 200, {
+      ok: true,
+      settings: config.settings ?? {},
+      _env: { CORS_ALLOWED_ORIGINS: envCorsOrigins },
+    });
+    return;
+  }
+
+  if (pathname === "/api/settings" && request.method === "PUT") {
+    if (!(await requireAdmin(request, response, url))) return;
+    try {
+      const body = JSON.parse(await parseRawBody(request, 64 * 1024));
+      const config = await relayStore.loadConfig();
+      // Merge settings
+      if (body.corsAllowedOrigins !== undefined) {
+        if (!config.settings) config.settings = {};
+        config.settings.corsAllowedOrigins = Array.isArray(body.corsAllowedOrigins)
+          ? body.corsAllowedOrigins.map(o => String(o).trim()).filter(Boolean)
+          : body.corsAllowedOrigins === null ? undefined : undefined;
+      }
+      await relayStore.replaceConfig(config);
+      relayConfig = config; // update in-memory
+      writeJson(response, 200, { ok: true, settings: config.settings });
+    } catch (err) {
+      writeJson(response, 400, { ok: false, error: String(err.message || err) });
+    }
     return;
   }
 
@@ -928,7 +1101,7 @@ server.on("request", async (request, response) => {
     const headerToken = normalizeNonEmpty(request.headers["x-relay-admin-token"]);
     const queryToken = normalizeNonEmpty(url.searchParams.get("adminToken"));
     const channelSecret = normalizeNonEmpty(request.headers["x-channel-secret"]);
-    let authed = headerToken === adminToken || queryToken === adminToken;
+    let authed = safeCompare(headerToken, adminToken) || safeCompare(queryToken, adminToken);
     if (!authed && await verifyBearerToken(request)) authed = true;
     // Allow channel user tokens (Bearer or query) to upload
     if (!authed) {
@@ -936,14 +1109,14 @@ server.on("request", async (request, response) => {
       const token = queryToken || bearer;
       if (token) {
         const cfg = await relayStore.loadConfig();
-        if (Object.values(cfg?.channels || {}).some(ch => ch.users?.some(u => u.token === token))) {
+        if (Object.values(cfg?.channels || {}).some(ch => ch.users?.some(u => safeCompare(u.token, token)))) {
           authed = true;
         }
       }
     }
     if (!authed && channelSecret) {
       const relayConfig = await relayStore.loadConfig();
-      authed = Object.values(relayConfig?.channels || {}).some(ch => ch.secret === channelSecret);
+      authed = Object.values(relayConfig?.channels || {}).some(ch => safeCompare(ch.secret, channelSecret));
     }
     if (!authed) {
       writeJson(response, 401, { ok: false, error: "auth required" });
@@ -1018,12 +1191,17 @@ server.on("request", async (request, response) => {
       const content = await readFile(filePath);
       const ext = extname(fileName);
       const mime = MEDIA_MIME_MAP[ext] || "application/octet-stream";
-      response.writeHead(200, {
+      const isImage = mime.startsWith("image/");
+      const headers = {
         "content-type": mime,
         "content-length": content.length,
         "cache-control": "public, max-age=86400",
-        "access-control-allow-origin": "*",
-      });
+        ...SECURITY_HEADERS,
+      };
+      if (!isImage) {
+        headers["content-disposition"] = "attachment";
+      }
+      response.writeHead(200, headers);
       response.end(content);
     } catch {
       writeJson(response, 404, { ok: false, error: "file not found" });
@@ -1032,15 +1210,18 @@ server.on("request", async (request, response) => {
   }
 
   // Serve static files from public/ (Vite build output)
-  const safePath = pathname.replace(/\.\./g, "").replace(/\/\//g, "/");
-  const filePath = join(publicDir, safePath);
+  const filePath = resolve(publicDir, pathname.slice(1));
+  if (!filePath.startsWith(publicDir)) {
+    writeJson(response, 403, { ok: false, error: "forbidden" });
+    return;
+  }
   try {
     await access(filePath);
     const content = await readFile(filePath);
-    const ext = extname(safePath);
+    const ext = extname(filePath);
     const mime = MIME_TYPES[ext] || "application/octet-stream";
     const cacheControl = ext === ".html" ? "no-cache" : "public, max-age=31536000, immutable";
-    response.writeHead(200, { "content-type": mime, "cache-control": cacheControl });
+    response.writeHead(200, { "content-type": mime, "cache-control": cacheControl, ...SECURITY_HEADERS });
     response.end(content);
     return;
   } catch {}
@@ -1050,8 +1231,27 @@ server.on("request", async (request, response) => {
 
 server.on("upgrade", (request, socket, head) => {
   const url = parseRequestUrl(request.url || "/");
+  const origin = request.headers.origin;
+  const clientIp = request.headers["x-forwarded-for"]?.split(",")[0]?.trim() || request.socket.remoteAddress;
+
+  // WebSocket origin validation (H-2)
+  if (origin && !isOriginAllowed(origin)) {
+    socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
+  // Per-IP connection limit (L-1)
+  if (!trackIpConnection(clientIp)) {
+    socket.write("HTTP/1.1 429 Too Many Requests\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
   if (url.pathname === "/backend") {
     backendWss.handleUpgrade(request, socket, head, (ws) => {
+      ws._clientIp = clientIp;
+      ws.on("close", () => untrackIpConnection(clientIp));
       backendWss.emit("connection", ws, request);
     });
     return;
@@ -1059,11 +1259,14 @@ server.on("upgrade", (request, socket, head) => {
 
   if (url.pathname === "/client") {
     clientWss.handleUpgrade(request, socket, head, (ws) => {
+      ws._clientIp = clientIp;
+      ws.on("close", () => untrackIpConnection(clientIp));
       clientWss.emit("connection", ws, request);
     });
     return;
   }
 
+  untrackIpConnection(clientIp);
   socket.destroy();
 });
 
