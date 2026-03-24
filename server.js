@@ -537,16 +537,11 @@ function extractRelayQuery(channelConfig, url) {
 
 backendWss.on("connection", (ws) => {
   let boundChannelId;
-  const rateBucket = { tokens: WS_MSG_RATE_LIMIT, lastRefill: Date.now() };
   let helloTimeout = setTimeout(() => {
     closeSocket(ws, 1008, "missing relay.backend.hello");
   }, 5000);
 
   ws.on("message", (raw) => {
-    if (!checkWsMsgRateLimit(rateBucket)) {
-      closeSocket(ws, 1008, "rate limit exceeded");
-      return;
-    }
     let frame;
     try {
       frame = JSON.parse(raw.toString());
