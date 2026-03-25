@@ -190,6 +190,26 @@ const backendPresence = new Map();
 const backendGraceTimers = new Map(); // channelId -> setTimeout handle
 const clientConnections = new Map();
 
+// WebSocket ping/pong heartbeat (detect dead connections)
+const PING_INTERVAL_MS = 30_000;
+const PONG_TIMEOUT_MS = 10_000;
+
+function setupPingPong(ws, label) {
+  let pongReceived = true;
+  const interval = setInterval(() => {
+    if (!pongReceived) {
+      console.log(`[relay] ${label} pong timeout, terminating`);
+      clearInterval(interval);
+      ws.terminate();
+      return;
+    }
+    pongReceived = false;
+    try { ws.ping(); } catch { clearInterval(interval); }
+  }, PING_INTERVAL_MS);
+  ws.on("pong", () => { pongReceived = true; });
+  ws.on("close", () => clearInterval(interval));
+}
+
 let relayConfig = {
   version: 1,
   channels: {},
@@ -537,6 +557,7 @@ function extractRelayQuery(channelConfig, url) {
 }
 
 backendWss.on("connection", (ws) => {
+  setupPingPong(ws, "backend");
   let boundChannelId;
   let helloTimeout = setTimeout(() => {
     closeSocket(ws, 1008, "missing relay.backend.hello");
@@ -694,6 +715,7 @@ backendWss.on("connection", (ws) => {
 });
 
 clientWss.on("connection", (ws, request) => {
+  setupPingPong(ws, "client");
   const url = parseRequestUrl(request.url || "/");
   const channelId = normalizeNonEmpty(url.searchParams.get("channelId"));
   if (!channelId) {
