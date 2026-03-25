@@ -191,23 +191,22 @@ const backendGraceTimers = new Map(); // channelId -> setTimeout handle
 const clientConnections = new Map();
 
 // WebSocket ping/pong heartbeat (detect dead connections)
-const PING_INTERVAL_MS = 30_000;
-const PONG_TIMEOUT_MS = 10_000;
+const PING_INTERVAL_MS = Number(process.env.RELAY_PING_INTERVAL_MS) || 30_000;
+const PONG_TIMEOUT_MS = Number(process.env.RELAY_PONG_TIMEOUT_MS) || 10_000;
+const GRACE_MS = Number(process.env.RELAY_GRACE_MS) || 30_000;
 
 function setupPingPong(ws, label) {
-  let pongReceived = true;
+  let pongTimer = null;
   const interval = setInterval(() => {
-    if (!pongReceived) {
-      console.log(`[relay] ${label} pong timeout, terminating`);
+    try { ws.ping(); } catch { clearInterval(interval); return; }
+    pongTimer = setTimeout(() => {
+      console.warn(`[relay] ${label} pong timeout (${PONG_TIMEOUT_MS}ms), terminating`);
       clearInterval(interval);
       ws.terminate();
-      return;
-    }
-    pongReceived = false;
-    try { ws.ping(); } catch { clearInterval(interval); }
+    }, PONG_TIMEOUT_MS);
   }, PING_INTERVAL_MS);
-  ws.on("pong", () => { pongReceived = true; });
-  ws.on("close", () => clearInterval(interval));
+  ws.on("pong", () => { if (pongTimer) { clearTimeout(pongTimer); pongTimer = null; } });
+  ws.on("close", () => { clearInterval(interval); if (pongTimer) { clearTimeout(pongTimer); pongTimer = null; } });
 }
 
 let relayConfig = {
@@ -287,6 +286,12 @@ function closeBackendChannel(channelId, code = 1012, reason = "backend replaced"
   const existing = backends.get(channelId);
   if (!existing) {
     return;
+  }
+
+  // Clean up grace timer if active
+  if (backendGraceTimers.has(channelId)) {
+    clearTimeout(backendGraceTimers.get(channelId));
+    backendGraceTimers.delete(channelId);
   }
 
   backends.delete(channelId);
@@ -610,7 +615,7 @@ backendWss.on("connection", (ws) => {
       });
 
       // Cancel grace period timer if backend reconnected
-      if (backendGraceTimers?.has(channelId)) {
+      if (backendGraceTimers.has(channelId)) {
         clearTimeout(backendGraceTimers.get(channelId));
         backendGraceTimers.delete(channelId);
         console.log(`[relay] backend reconnected within grace period: ${channelId}`);
@@ -678,8 +683,7 @@ backendWss.on("connection", (ws) => {
       lastDisconnectedAt: Date.now(),
     });
 
-    // Grace period: give backend 30s to reconnect before killing clients
-    const GRACE_MS = 30_000;
+    // Grace period: give backend time to reconnect before killing clients
     const disconnectedChannel = boundChannelId;
     console.log(`[relay] backend disconnected: ${disconnectedChannel}, grace period ${GRACE_MS / 1000}s`);
 
@@ -697,12 +701,15 @@ backendWss.on("connection", (ws) => {
         // Backend reconnected during grace period — already handled
         return;
       }
+      let closed = 0;
       for (const [connectionId, client] of clientConnections.entries()) {
         if (client.channelId !== disconnectedChannel) continue;
         clientConnections.delete(connectionId);
         closeSocket(client.ws, 1012, "backend disconnected");
+        closed++;
       }
-      console.log(`[relay] grace period expired for ${disconnectedChannel}, clients disconnected`);
+      backendGraceTimers.delete(disconnectedChannel);
+      console.warn(`[relay] grace period expired for ${disconnectedChannel}, closed ${closed} client(s)`);
     }, GRACE_MS);
 
     // Store timer so reconnecting backend can cancel it
@@ -730,9 +737,13 @@ clientWss.on("connection", (ws, request) => {
   }
 
   const backend = backends.get(channelId);
+  const inGracePeriod = backendGraceTimers.has(channelId);
   if (!backend || backend.ws.readyState !== WebSocket.OPEN) {
-    closeSocket(ws, 1013, "backend unavailable");
-    return;
+    if (!inGracePeriod) {
+      closeSocket(ws, 1013, "backend unavailable");
+      return;
+    }
+    // Allow connection during grace period — client will get relay.backend.disconnected below
   }
 
   const authResult = authenticateClientConnection(channelConfig, url);
@@ -751,13 +762,21 @@ clientWss.on("connection", (ws, request) => {
     userId: authResult.authUser?.senderId,
   });
 
-  sendJson(backend.ws, {
-    type: "relay.client.open",
-    connectionId,
-    query,
-    authUser: authResult.authUser,
-    timestamp: Date.now(),
-  });
+  // Notify client if backend is in grace period
+  if (inGracePeriod) {
+    sendJson(ws, { type: "relay.backend.disconnected", grace: GRACE_MS });
+  }
+
+  // Only notify backend if it's actually connected
+  if (backend && backend.ws.readyState === WebSocket.OPEN) {
+    sendJson(backend.ws, {
+      type: "relay.client.open",
+      connectionId,
+      query,
+      authUser: authResult.authUser,
+      timestamp: Date.now(),
+    });
+  }
 
   ws.on("message", (raw) => {
     if (!checkWsMsgRateLimit(clientRateBucket)) {
@@ -766,6 +785,11 @@ clientWss.on("connection", (ws, request) => {
     }
     const currentBackend = backends.get(channelId);
     if (!currentBackend || currentBackend.ws.readyState !== WebSocket.OPEN) {
+      // During grace period: send error event back instead of killing the connection
+      if (backendGraceTimers.has(channelId)) {
+        sendJson(ws, { type: "relay.error", code: "BACKEND_UNAVAILABLE", message: "backend temporarily unavailable, message not delivered" });
+        return;
+      }
       closeClientConnection(connectionId, 1012, "backend unavailable");
       return;
     }
