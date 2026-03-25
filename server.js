@@ -282,7 +282,7 @@ function closeClientConnection(connectionId, code = 1000, reason = "closed") {
   closeSocket(entry.ws, code, reason);
 }
 
-function closeBackendChannel(channelId, code = 1012, reason = "backend replaced") {
+function closeBackendChannel(channelId, code = 1012, reason = "backend replaced", { keepClients = false } = {}) {
   const existing = backends.get(channelId);
   if (!existing) {
     return;
@@ -302,12 +302,14 @@ function closeBackendChannel(channelId, code = 1012, reason = "backend replaced"
     lastDisconnectedAt: Date.now(),
   });
 
-  for (const [connectionId, client] of clientConnections.entries()) {
-    if (client.channelId !== channelId) {
-      continue;
+  if (!keepClients) {
+    for (const [connectionId, client] of clientConnections.entries()) {
+      if (client.channelId !== channelId) {
+        continue;
+      }
+      clientConnections.delete(connectionId);
+      closeSocket(client.ws, code, reason);
     }
-    clientConnections.delete(connectionId);
-    closeSocket(client.ws, code, reason);
   }
   closeSocket(existing.ws, code, reason);
 }
@@ -602,7 +604,9 @@ backendWss.on("connection", (ws) => {
       helloTimeout = null;
       boundChannelId = channelId;
 
-      closeBackendChannel(channelId, 1012, "backend replaced");
+      // During grace period: keep clients alive; otherwise normal replace kills them
+      const isGraceReconnect = backendGraceTimers.has(channelId);
+      closeBackendChannel(channelId, 1012, "backend replaced", { keepClients: isGraceReconnect });
       backends.set(channelId, {
         ws,
         channelId,
@@ -615,16 +619,23 @@ backendWss.on("connection", (ws) => {
       });
 
       // Cancel grace period timer if backend reconnected
-      if (backendGraceTimers.has(channelId)) {
-        clearTimeout(backendGraceTimers.get(channelId));
-        backendGraceTimers.delete(channelId);
+      if (isGraceReconnect) {
+        // Timer already cleared by closeBackendChannel
         console.log(`[relay] backend reconnected within grace period: ${channelId}`);
-        // Notify clients that backend is back
-        for (const [, client] of clientConnections.entries()) {
+        // Notify clients that backend is back + register them with new backend
+        for (const [connectionId, client] of clientConnections.entries()) {
           if (client.channelId !== channelId) continue;
           try {
             client.ws.send(JSON.stringify({ type: "relay.backend.reconnected" }));
           } catch { /* client may be gone */ }
+          // S13: Tell new backend about existing clients
+          sendJson(ws, {
+            type: "relay.client.open",
+            connectionId,
+            query: {},
+            authUser: client.userId ? { senderId: client.userId } : undefined,
+            timestamp: Date.now(),
+          });
         }
       }
 
