@@ -187,6 +187,7 @@ const clientWss = new WebSocketServer({ noServer: true, maxPayload: 10485760 });
 
 const backends = new Map();
 const backendPresence = new Map();
+const backendGraceTimers = new Map(); // channelId -> setTimeout handle
 const clientConnections = new Map();
 
 let relayConfig = {
@@ -587,6 +588,20 @@ backendWss.on("connection", (ws) => {
         lastDisconnectedAt: undefined,
       });
 
+      // Cancel grace period timer if backend reconnected
+      if (backendGraceTimers?.has(channelId)) {
+        clearTimeout(backendGraceTimers.get(channelId));
+        backendGraceTimers.delete(channelId);
+        console.log(`[relay] backend reconnected within grace period: ${channelId}`);
+        // Notify clients that backend is back
+        for (const [, client] of clientConnections.entries()) {
+          if (client.channelId !== channelId) continue;
+          try {
+            client.ws.send(JSON.stringify({ type: "relay.backend.reconnected" }));
+          } catch { /* client may be gone */ }
+        }
+      }
+
       sendJson(ws, {
         type: "relay.backend.ack",
         channelId,
@@ -641,14 +656,36 @@ backendWss.on("connection", (ws) => {
       ...presence,
       lastDisconnectedAt: Date.now(),
     });
-    for (const [connectionId, client] of clientConnections.entries()) {
-      if (client.channelId !== boundChannelId) {
-        continue;
-      }
-      clientConnections.delete(connectionId);
-      closeSocket(client.ws, 1012, "backend disconnected");
+
+    // Grace period: give backend 30s to reconnect before killing clients
+    const GRACE_MS = 30_000;
+    const disconnectedChannel = boundChannelId;
+    console.log(`[relay] backend disconnected: ${disconnectedChannel}, grace period ${GRACE_MS / 1000}s`);
+
+    // Notify clients that backend is temporarily unavailable
+    for (const [, client] of clientConnections.entries()) {
+      if (client.channelId !== disconnectedChannel) continue;
+      try {
+        client.ws.send(JSON.stringify({ type: "relay.backend.disconnected", grace: GRACE_MS }));
+      } catch { /* client may be gone */ }
     }
-    console.log(`[relay] backend disconnected: ${boundChannelId}`);
+
+    const graceTimer = setTimeout(() => {
+      // If backend hasn't reconnected, close all clients
+      if (backends.has(disconnectedChannel)) {
+        // Backend reconnected during grace period — already handled
+        return;
+      }
+      for (const [connectionId, client] of clientConnections.entries()) {
+        if (client.channelId !== disconnectedChannel) continue;
+        clientConnections.delete(connectionId);
+        closeSocket(client.ws, 1012, "backend disconnected");
+      }
+      console.log(`[relay] grace period expired for ${disconnectedChannel}, clients disconnected`);
+    }, GRACE_MS);
+
+    // Store timer so reconnecting backend can cancel it
+    backendGraceTimers.set(disconnectedChannel, graceTimer);
   });
 
   ws.on("error", (error) => {
