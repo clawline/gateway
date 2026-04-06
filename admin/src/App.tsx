@@ -4,8 +4,12 @@ import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import {
   Activity,
+  BarChart3,
   Check,
+  ChevronDown,
+  ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Copy,
   Database,
   Globe,
@@ -13,6 +17,8 @@ import {
   CircleAlert,
   Lock,
   LogOut,
+  MessageSquare,
+  Mic,
   Network,
   Pencil,
   Plus,
@@ -126,9 +132,12 @@ type RelayNode = {
 };
 
 const RELAY_REGISTRY_KEY = 'relay-registry';
-const DEFAULT_RELAY: RelayNode = { id: 'default', name: 'relay.restry.cn', url: 'https://relay.restry.cn', adminToken: '5ff160a5089321692679f5a8442686b8' };
+const isLocal = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+const DEFAULT_RELAY: RelayNode = { id: 'default', name: isLocal ? 'localhost' : 'relay.restry.cn', url: isLocal ? window.location.origin : 'https://relay.restry.cn', adminToken: isLocal ? 'local-test-token' : '5ff160a5089321692679f5a8442686b8' };
 
 function loadRelayRegistryLocal(): RelayNode[] {
+  // On localhost, always use the local gateway as default
+  if (isLocal) return [DEFAULT_RELAY];
   try {
     const raw = localStorage.getItem(RELAY_REGISTRY_KEY);
     if (!raw) return [DEFAULT_RELAY];
@@ -254,6 +263,21 @@ function buildClientConnectUrl(state: RelayState | null, channel: RelayChannel, 
 function formatTimestamp(timestamp?: number) {
   if (!timestamp) return 'N/A';
   return new Date(timestamp).toLocaleString();
+}
+
+function relativeTime(ts: number | string): string {
+  const now = Date.now();
+  const then = typeof ts === 'string' ? new Date(ts).getTime() : ts;
+  const diffMs = now - then;
+  if (diffMs < 0) return 'just now';
+  const seconds = Math.floor(diffMs / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 
 function buildDiagnosticLines(state: RelayState) {
@@ -700,6 +724,9 @@ export default function App() {
   const { isAuthenticated: isLogtoAuth, isLoading: isLogtoLoading, signIn, signOut, getIdTokenClaims } = useLogto();
   const [logtoUser, setLogtoUser] = useState<IdTokenClaims | null>(null);
 
+  // Dev bypass: skip Logto auth on localhost
+  const isDevBypass = isLocal && !isLogtoAuth && !isLogtoLoading;
+
   useEffect(() => {
     if (isLogtoAuth) {
       void getIdTokenClaims().then((claims) => { if (claims) setLogtoUser(claims); });
@@ -719,7 +746,7 @@ export default function App() {
     );
   }
 
-  if (!isLogtoAuth) {
+  if (!isLogtoAuth && !isDevBypass) {
     return (
       <div className="min-h-screen bg-[#020617] text-slate-300 flex items-center justify-center relative overflow-hidden">
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_40%,oklch(0.18_0.04_220),oklch(0.06_0.02_250))] opacity-70" />
@@ -787,18 +814,19 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
   const [isRelaySettingsOpen, setIsRelaySettingsOpen] = useState(false);
   const [editingRelay, setEditingRelay] = useState<RelayNode | null>(null);
 
-  // ── AI Settings ──
-  const [isAiSettingsOpen, setIsAiSettingsOpen] = useState(false);
-  const [aiSettings, setAiSettings] = useState({ llmEndpoint: '', llmApiKey: '', llmModel: '', suggestionPrompt: '', voiceRefinePrompt: '' });
-  const [aiSettingsSaving, setAiSettingsSaving] = useState(false);
-
   const activeRelay = relayNodes.find((n) => n.id === selectedRelayId) ?? relayNodes[0] ?? DEFAULT_RELAY;
   const gatewayRelay: RelayNode = DEFAULT_RELAY;
 
+  // ── AI Settings ──
+  const [isAiSettingsOpen, setIsAiSettingsOpen] = useState(false);
+  const [aiSettings, setAiSettings] = useState({ llmEndpoint: '', llmApiKey: '', llmModel: '', suggestionModel: '', voiceRefineModel: '', suggestionPrompt: '', voiceRefinePrompt: '' });
+  const [aiSettingsSaving, setAiSettingsSaving] = useState(false);
+  const [aiSettingsTab, setAiSettingsTab] = useState<'provider' | 'suggestions' | 'voice'>('provider');
+
   const fetchAiSettings = useCallback(async () => {
     try {
-      const data = await apiFetch<{ ok: boolean; llmEndpoint?: string; llmApiKey?: string; llmModel?: string; suggestionPrompt?: string; voiceRefinePrompt?: string }>('/api/ai-settings', activeRelay, undefined);
-      if (data.ok) setAiSettings({ llmEndpoint: data.llmEndpoint || '', llmApiKey: data.llmApiKey || '', llmModel: data.llmModel || '', suggestionPrompt: data.suggestionPrompt || '', voiceRefinePrompt: data.voiceRefinePrompt || '' });
+      const data = await apiFetch<{ ok: boolean; llmEndpoint?: string; llmApiKey?: string; llmModel?: string; suggestionModel?: string; voiceRefineModel?: string; suggestionPrompt?: string; voiceRefinePrompt?: string }>('/api/ai-settings', activeRelay, undefined);
+      if (data.ok) setAiSettings({ llmEndpoint: data.llmEndpoint || '', llmApiKey: data.llmApiKey || '', llmModel: data.llmModel || '', suggestionModel: data.suggestionModel || '', voiceRefineModel: data.voiceRefineModel || '', suggestionPrompt: data.suggestionPrompt || '', voiceRefinePrompt: data.voiceRefinePrompt || '' });
     } catch { /* ignore */ }
   }, [activeRelay]);
 
@@ -808,14 +836,54 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
     setAiSettingsSaving(false);
   }, [activeRelay, aiSettings]);
 
+  // ── Message Log ──
+  type MessageRow = { id: string; channel_id: string; sender_id: string | null; agent_id: string | null; content: string | null; content_type: string; direction: string; meta: string | null; timestamp: number; created_at: string };
+  const [currentView, setCurrentView] = useState<'dashboard' | 'messages'>('dashboard');
+  const [messageLogRows, setMessageLogRows] = useState<MessageRow[]>([]);
+  const [messageLogTotal, setMessageLogTotal] = useState(0);
+  const [messageLogChannel, setMessageLogChannel] = useState('');
+  const [messageLogLoading, setMessageLogLoading] = useState(false);
+  const [messageLogPage, setMessageLogPage] = useState(0);
+  const [messageLogDirection, setMessageLogDirection] = useState<'' | 'inbound' | 'outbound'>('');
+  const [messageLogAutoRefresh, setMessageLogAutoRefresh] = useState(false);
+  const [expandedMessageId, setExpandedMessageId] = useState<string | null>(null);
+  const [messageAnalyticsOpen, setMessageAnalyticsOpen] = useState(true);
+  const MESSAGE_PAGE_SIZE = 50;
+
+  type StatsData = { hourly: { hour: string; inbound: number; outbound: number }[]; models: { name: string; count: number }[]; channels: { name: string; inbound: number; outbound: number }[] };
+  const [messageStats, setMessageStats] = useState<StatsData | null>(null);
+
+  const fetchMessageLog = useCallback(async (opts?: { channel?: string; direction?: string; page?: number }) => {
+    setMessageLogLoading(true);
+    try {
+      const ch = opts?.channel ?? messageLogChannel;
+      const dir = opts?.direction ?? messageLogDirection;
+      const pg = opts?.page ?? messageLogPage;
+      const params = new URLSearchParams({ limit: String(MESSAGE_PAGE_SIZE), offset: String(pg * MESSAGE_PAGE_SIZE) });
+      if (ch) params.set('channelId', ch);
+      if (dir) params.set('direction', dir);
+      const data = await apiFetch<{ ok: boolean; messages: MessageRow[]; total: number }>(`/api/messages?${params}`, activeRelay, undefined);
+      if (data.ok) { setMessageLogRows(data.messages); setMessageLogTotal(data.total); }
+    } catch { /* ignore */ }
+    setMessageLogLoading(false);
+  }, [activeRelay, messageLogChannel, messageLogDirection, messageLogPage]);
+
+  const fetchMessageStats = useCallback(async () => {
+    try {
+      const data = await apiFetch<{ ok: boolean } & StatsData>('/api/messages/stats', activeRelay, undefined);
+      if (data.ok) setMessageStats(data);
+    } catch { /* ignore */ }
+  }, [activeRelay]);
+
 
   const updateRelayNodes = async (next: RelayNode[]) => {
     setRelayNodes(next);
     saveRelayRegistryLocal(next);
   };
 
-  // Load relay nodes from server on mount
+  // Load relay nodes from server on mount (skip on localhost — use local gateway)
   useEffect(() => {
+    if (isLocal) return;
     (async () => {
       const serverNodes = await fetchRelayNodesFromServer(gatewayRelay);
       if (serverNodes) {
@@ -924,6 +992,18 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
       setSelectedChannelId(channels[0].channelId);
     }
   }, [relayState]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Message Log auto-refresh ──────────────────────────────
+  useEffect(() => {
+    if (!messageLogAutoRefresh || currentView !== 'messages') return;
+    const id = window.setInterval(() => { void fetchMessageLog(); }, 10_000);
+    return () => window.clearInterval(id);
+  }, [messageLogAutoRefresh, currentView, fetchMessageLog]);
+
+  // Refetch when page/direction/channel changes
+  useEffect(() => {
+    if (currentView === 'messages') { void fetchMessageLog(); void fetchMessageStats(); }
+  }, [messageLogPage, messageLogDirection, messageLogChannel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Diagnostic ─────────────────────────────────────────────
   const runDiagnostic = async () => {
@@ -1070,6 +1150,10 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
               className="p-1.5 border border-slate-700 text-amber-400 hover:text-amber-300 hover:border-amber-600 transition-colors" title="AI Settings">
               <Sparkles className="w-3.5 h-3.5" strokeWidth={1.8} />
             </button>
+            <button type="button" onClick={() => { if (currentView === 'messages') { setCurrentView('dashboard'); } else { setCurrentView('messages'); void fetchMessageLog(); void fetchMessageStats(); } }}
+              className={cn('p-1.5 border transition-colors', currentView === 'messages' ? 'border-emerald-500 text-emerald-300 bg-emerald-950/40' : 'border-slate-700 text-emerald-400 hover:text-emerald-300 hover:border-emerald-600')} title="Message Log">
+              <MessageSquare className="w-3.5 h-3.5" strokeWidth={1.8} />
+            </button>
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -1173,52 +1257,112 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
         </ModalShell>
       )}
 
-      {/* ── AI Settings Modal ── */}
+      {/* ── AI Settings Modal (redesigned with tabs) ── */}
       {isAiSettingsOpen && (
-        <ModalShell title="AI_SETTINGS" icon={Sparkles} onClose={() => setIsAiSettingsOpen(false)}>
-          <div className="space-y-5">
-            <div>
-              <h3 className="text-xs font-medium text-amber-400 tracking-widest uppercase mb-3">LLM Provider (override defaults)</h3>
-              <div className="space-y-3">
-                <div>
-                  <label className={labelClassName}>Endpoint</label>
-                  <input className={inputClassName} value={aiSettings.llmEndpoint}
-                    onChange={e => setAiSettings(s => ({ ...s, llmEndpoint: e.target.value }))}
-                    placeholder="(default: resley Azure OpenAI)" />
-                </div>
-                <div>
-                  <label className={labelClassName}>API Key (leave empty to use env var)</label>
-                  <input className={inputClassName} type="password" value={aiSettings.llmApiKey}
-                    onChange={e => setAiSettings(s => ({ ...s, llmApiKey: e.target.value }))}
-                    placeholder="(default: AZURE_OPENAI_API_KEY env)" />
-                </div>
-                <div>
-                  <label className={labelClassName}>Model</label>
-                  <input className={inputClassName} value={aiSettings.llmModel}
-                    onChange={e => setAiSettings(s => ({ ...s, llmModel: e.target.value }))}
-                    placeholder="(default: gpt-5.4-mini)" />
-                </div>
+        <ModalShell title="AI_SETTINGS" icon={Sparkles} onClose={() => setIsAiSettingsOpen(false)} maxWidth="max-w-xl">
+          {/* Tab bar */}
+          <div className="flex border-b border-slate-800 -mx-5 px-5 mb-5">
+            {([['provider', 'Provider', Globe], ['suggestions', 'Suggestions', Sparkles], ['voice', 'Voice', Mic]] as const).map(([key, label, TabIcon]) => (
+              <button key={key} type="button" onClick={() => setAiSettingsTab(key)}
+                className={cn('flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium tracking-wide transition-colors border-b-2 -mb-px',
+                  aiSettingsTab === key ? 'border-amber-500 text-amber-400' : 'border-transparent text-slate-500 hover:text-slate-300')}>
+                <TabIcon className="w-3.5 h-3.5" />
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {/* Provider tab */}
+          {aiSettingsTab === 'provider' && (
+            <div className="space-y-4">
+              <p className="text-[11px] text-slate-500 leading-relaxed">Override the default Azure OpenAI config. Leave empty to use hardcoded defaults (gpt-5.4-mini).</p>
+              <div>
+                <label className={labelClassName}>Endpoint</label>
+                <input className={inputClassName} value={aiSettings.llmEndpoint}
+                  onChange={e => setAiSettings(s => ({ ...s, llmEndpoint: e.target.value }))}
+                  placeholder="https://resley-east-us-2-resource.openai.azure.com/openai/v1" />
+              </div>
+              <div>
+                <label className={labelClassName}>API Key</label>
+                <input className={inputClassName} type="password" value={aiSettings.llmApiKey}
+                  onChange={e => setAiSettings(s => ({ ...s, llmApiKey: e.target.value }))}
+                  placeholder="Leave empty → AZURE_OPENAI_API_KEY env" />
+              </div>
+              <div>
+                <label className={labelClassName}>Default Model</label>
+                <select className={inputClassName} value={aiSettings.llmModel}
+                  onChange={e => setAiSettings(s => ({ ...s, llmModel: e.target.value }))}>
+                  <option value="">gpt-5.4-mini (default)</option>
+                  {['gpt-5.4', 'gpt-5.4-pro', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5-mini', 'gpt-4.1', 'gpt-4o', 'gpt-image-1', 'gpt-4o-mini-transcribe', 'gpt-4o-transcribe', 'MiniMax-M2.5', 'FW-GLM-5', 'Kimi-K2.5'].map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-slate-600 mt-1">Used when no per-feature model is set.</p>
               </div>
             </div>
-            <div className="border-t border-slate-800 pt-4">
-              <h3 className="text-xs font-medium text-amber-400 tracking-widest uppercase mb-3">Suggestion System Prompt</h3>
-              <textarea className={inputClassName + ' min-h-[100px] resize-y'} value={aiSettings.suggestionPrompt}
-                onChange={e => setAiSettings(s => ({ ...s, suggestionPrompt: e.target.value }))}
-                placeholder="Global system prompt for AI suggestions (leave empty for default)" />
+          )}
+
+          {/* Suggestions tab */}
+          {aiSettingsTab === 'suggestions' && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 mb-1">
+                <Sparkles className="w-4 h-4 text-amber-400" />
+                <span className="text-xs font-medium text-amber-400 tracking-widest uppercase">Smart Suggestions</span>
+              </div>
+              <div>
+                <label className={labelClassName}>Model</label>
+                <select className={inputClassName} value={aiSettings.suggestionModel}
+                  onChange={e => setAiSettings(s => ({ ...s, suggestionModel: e.target.value }))}>
+                  <option value="">(default: {aiSettings.llmModel || 'gpt-5.4-mini'})</option>
+                  {['gpt-5.4', 'gpt-5.4-pro', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5-mini', 'gpt-4.1', 'gpt-4o', 'gpt-image-1', 'gpt-4o-mini-transcribe', 'gpt-4o-transcribe', 'MiniMax-M2.5', 'FW-GLM-5', 'Kimi-K2.5'].map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-slate-600 mt-1">Override model for suggestions only. Empty = use default model above.</p>
+              </div>
+              <div>
+                <label className={labelClassName}>System Prompt</label>
+                <textarea className={inputClassName + ' min-h-[120px] resize-y'} value={aiSettings.suggestionPrompt}
+                  onChange={e => setAiSettings(s => ({ ...s, suggestionPrompt: e.target.value }))}
+                  placeholder="Leave empty for built-in prompt. User custom prompts are appended to this." />
+              </div>
             </div>
-            <div className="border-t border-slate-800 pt-4">
-              <h3 className="text-xs font-medium text-amber-400 tracking-widest uppercase mb-3">Voice Refine System Prompt</h3>
-              <textarea className={inputClassName + ' min-h-[100px] resize-y'} value={aiSettings.voiceRefinePrompt}
-                onChange={e => setAiSettings(s => ({ ...s, voiceRefinePrompt: e.target.value }))}
-                placeholder="Global system prompt for voice text refinement (leave empty for default)" />
+          )}
+
+          {/* Voice tab */}
+          {aiSettingsTab === 'voice' && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 mb-1">
+                <Mic className="w-4 h-4 text-amber-400" />
+                <span className="text-xs font-medium text-amber-400 tracking-widest uppercase">Voice Refinement</span>
+              </div>
+              <div>
+                <label className={labelClassName}>Model</label>
+                <select className={inputClassName} value={aiSettings.voiceRefineModel}
+                  onChange={e => setAiSettings(s => ({ ...s, voiceRefineModel: e.target.value }))}>
+                  <option value="">(default: {aiSettings.llmModel || 'gpt-5.4-mini'})</option>
+                  {['gpt-5.4', 'gpt-5.4-pro', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5-mini', 'gpt-4.1', 'gpt-4o', 'gpt-image-1', 'gpt-4o-mini-transcribe', 'gpt-4o-transcribe', 'MiniMax-M2.5', 'FW-GLM-5', 'Kimi-K2.5'].map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-slate-600 mt-1">Override model for voice refinement only. Empty = use default model above.</p>
+              </div>
+              <div>
+                <label className={labelClassName}>System Prompt</label>
+                <textarea className={inputClassName + ' min-h-[120px] resize-y'} value={aiSettings.voiceRefinePrompt}
+                  onChange={e => setAiSettings(s => ({ ...s, voiceRefinePrompt: e.target.value }))}
+                  placeholder="Leave empty for built-in prompt. User custom prompts are appended to this." />
+              </div>
             </div>
-            <div className="border-t border-slate-800 pt-4">
-              <button type="button" onClick={() => void saveAiSettingsHandler()} disabled={aiSettingsSaving}
-                className="w-full py-2.5 border border-amber-700 text-amber-400 hover:bg-amber-950/50 transition-colors flex items-center justify-center gap-2 text-xs disabled:opacity-50">
-                {aiSettingsSaving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
-                SAVE_SETTINGS
-              </button>
-            </div>
+          )}
+
+          {/* Save button */}
+          <div className="mt-5 pt-4 border-t border-slate-800">
+            <button type="button" onClick={() => void saveAiSettingsHandler()} disabled={aiSettingsSaving}
+              className="w-full py-2.5 border border-amber-700/60 text-amber-400 hover:bg-amber-950/40 transition-colors flex items-center justify-center gap-2 text-xs disabled:opacity-50">
+              {aiSettingsSaving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+              SAVE_SETTINGS
+            </button>
           </div>
         </ModalShell>
       )}
@@ -1252,6 +1396,22 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
           <div className="border border-rose-900/30 bg-rose-950/20 px-4 py-3 text-xs text-rose-400">{dashboardError}</div>
         )}
 
+        {/* ── View Toggle Nav ── */}
+        <div className="flex items-center gap-1 shrink-0">
+          <button type="button" onClick={() => setCurrentView('dashboard')}
+            className={cn('px-4 py-2 text-xs font-medium tracking-widest uppercase border-b-2 transition-colors',
+              currentView === 'dashboard' ? 'border-cyan-500 text-cyan-400' : 'border-transparent text-slate-500 hover:text-slate-300')}>
+            <div className="flex items-center gap-1.5"><Server className="w-3.5 h-3.5" /> Dashboard</div>
+          </button>
+          <button type="button" onClick={() => { setCurrentView('messages'); void fetchMessageLog(); void fetchMessageStats(); }}
+            className={cn('px-4 py-2 text-xs font-medium tracking-widest uppercase border-b-2 transition-colors',
+              currentView === 'messages' ? 'border-emerald-500 text-emerald-400' : 'border-transparent text-slate-500 hover:text-slate-300')}>
+            <div className="flex items-center gap-1.5"><MessageSquare className="w-3.5 h-3.5" /> Messages</div>
+          </button>
+          <div className="flex-1 border-b border-slate-800" />
+        </div>
+
+        {currentView === 'dashboard' && (<>
         {/* Overview */}
         <Panel title="RELAY_GATEWAY" icon={Server} className="shrink-0">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -1411,6 +1571,261 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
             </div>
           </Panel>
         </div>
+        </>)}
+
+        {currentView === 'messages' && (<>
+        {/* ── Stats Summary Bar ── */}
+        {(() => {
+          const inboundCount = messageLogRows.filter(m => m.direction === 'inbound').length;
+          const outboundCount = messageLogRows.filter(m => m.direction === 'outbound').length;
+          const uniqueChannels = new Set(messageLogRows.map(m => m.channel_id)).size;
+          return (
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 shrink-0">
+              {[
+                { label: 'TOTAL MESSAGES', value: messageLogTotal, color: 'text-cyan-400' },
+                { label: 'INBOUND', value: inboundCount, color: 'text-blue-400' },
+                { label: 'OUTBOUND', value: outboundCount, color: 'text-emerald-400' },
+                { label: 'UNIQUE CHANNELS', value: uniqueChannels, color: 'text-amber-400' },
+              ].map(stat => (
+                <div key={stat.label} className="bg-slate-900/50 border border-slate-800 px-4 py-3">
+                  <div className="text-[10px] text-slate-500 tracking-widest uppercase">{stat.label}</div>
+                  <div className={cn('font-mono text-2xl', stat.color)}>{stat.value}</div>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
+
+        {/* ── Analytics Section (collapsible) ── */}
+        <div className="bg-slate-900/50 border border-slate-800 shrink-0">
+          <button type="button" onClick={() => setMessageAnalyticsOpen(!messageAnalyticsOpen)}
+            className="w-full flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80 hover:bg-slate-900 transition-colors">
+            <BarChart3 className="w-3.5 h-3.5 text-amber-500" strokeWidth={1.8} />
+            <span className="text-[11px] font-medium text-slate-400 tracking-widest uppercase">Analytics</span>
+            <span className="flex-1" />
+            {messageAnalyticsOpen ? <ChevronUp className="w-3.5 h-3.5 text-slate-500" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-500" />}
+          </button>
+          {messageAnalyticsOpen && messageStats && (
+            <div className="p-3 grid grid-cols-1 lg:grid-cols-3 gap-3">
+              {/* Messages per hour — thin bar chart with grid */}
+              <div className="bg-slate-950/60 border border-slate-800 flex flex-col overflow-hidden">
+                <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80">
+                  <BarChart3 className="w-3.5 h-3.5 text-cyan-500/80" strokeWidth={1.8} />
+                  <span className="text-[10px] font-medium text-slate-500 tracking-[0.2em] uppercase">Messages / Hour</span>
+                  <span className="flex-1" />
+                  <span className="text-[9px] text-slate-600 font-mono">24H</span>
+                </div>
+                <div className="px-3 pt-3 pb-1 relative">
+                  {/* Grid lines */}
+                  <div className="absolute inset-x-3 top-3 bottom-6 flex flex-col justify-between pointer-events-none">
+                    {[0, 1, 2, 3].map(i => <div key={i} className="border-t border-slate-800/50" />)}
+                  </div>
+                  {/* Bars */}
+                  <div className="flex items-end gap-[1px] h-[100px] relative">
+                    {(() => {
+                      const maxVal = Math.max(1, ...messageStats.hourly.map(h => h.inbound + h.outbound));
+                      return messageStats.hourly.map((h, i) => {
+                        const total = h.inbound + h.outbound;
+                        const pct = (total / maxVal) * 100;
+                        return (
+                          <div key={i} className="flex-1 flex flex-col items-center justify-end h-full group relative">
+                            <div className="absolute -top-5 left-1/2 -translate-x-1/2 hidden group-hover:block bg-slate-900 border border-slate-700 text-[8px] text-slate-300 px-1.5 py-0.5 whitespace-nowrap z-10 font-mono shadow-lg">
+                              {h.hour} · <span className="text-blue-400">↑{h.inbound}</span> <span className="text-emerald-400">↓{h.outbound}</span>
+                            </div>
+                            {total > 0 ? (
+                              <div style={{ height: `${Math.max(pct, 2)}%` }} className="w-full flex flex-col justify-end overflow-hidden">
+                                {h.outbound > 0 && <div style={{ flex: h.outbound }} className="bg-emerald-500/50 group-hover:bg-emerald-400/70 transition-colors min-h-[1px]" />}
+                                {h.inbound > 0 && <div style={{ flex: h.inbound }} className="bg-cyan-500/50 group-hover:bg-cyan-400/70 transition-colors min-h-[1px]" />}
+                              </div>
+                            ) : (
+                              <div className="w-full h-[1px] bg-slate-800/80" />
+                            )}
+                          </div>
+                        );
+                      });
+                    })()}
+                  </div>
+                  {/* Time labels */}
+                  <div className="flex mt-1.5">
+                    {messageStats.hourly.map((h, i) => (
+                      <div key={i} className="flex-1 text-center">
+                        {i % 4 === 0 && <span className="text-[7px] text-slate-600 font-mono">{h.hour}</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="px-3 pb-2 flex gap-4 text-[9px] text-slate-600">
+                  <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 bg-cyan-500/60 rounded-[1px]" /> In</span>
+                  <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 bg-emerald-500/60 rounded-[1px]" /> Out</span>
+                </div>
+              </div>
+
+              {/* Model usage — horizontal bars with glow */}
+              <div className="bg-slate-950/60 border border-slate-800 flex flex-col overflow-hidden">
+                <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80">
+                  <Activity className="w-3.5 h-3.5 text-cyan-500/80" strokeWidth={1.8} />
+                  <span className="text-[10px] font-medium text-slate-500 tracking-[0.2em] uppercase">Model Usage</span>
+                </div>
+                <div className="px-3 py-3 space-y-2.5 max-h-[160px] overflow-y-auto">
+                  {messageStats.models.length === 0 && <div className="text-slate-600 text-[10px] py-4 text-center font-mono">No model data</div>}
+                  {(() => {
+                    const maxCount = Math.max(1, ...messageStats.models.map(m => m.count));
+                    const colors = ['bg-cyan-500/50', 'bg-fuchsia-500/50', 'bg-amber-500/50', 'bg-emerald-500/50', 'bg-blue-500/50'];
+                    return messageStats.models.map((m, i) => (
+                      <div key={m.name}>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="text-[10px] text-slate-400 font-mono truncate" title={m.name}>{m.name.split('/').pop()}</span>
+                          <span className="text-[10px] text-slate-500 font-mono tabular-nums ml-2">{m.count}</span>
+                        </div>
+                        <div className="bg-slate-800/40 h-[6px] rounded-[2px] overflow-hidden">
+                          <div className={cn('h-full rounded-[2px] transition-all', colors[i % colors.length])}
+                            style={{ width: `${(m.count / maxCount) * 100}%` }} />
+                        </div>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+
+              {/* Channel distribution — horizontal stacked bars */}
+              <div className="bg-slate-950/60 border border-slate-800 flex flex-col overflow-hidden">
+                <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80">
+                  <Network className="w-3.5 h-3.5 text-cyan-500/80" strokeWidth={1.8} />
+                  <span className="text-[10px] font-medium text-slate-500 tracking-[0.2em] uppercase">Channel Activity</span>
+                </div>
+                <div className="px-3 py-3 space-y-2.5 max-h-[160px] overflow-y-auto">
+                  {messageStats.channels.length === 0 && <div className="text-slate-600 text-[10px] py-4 text-center font-mono">No data</div>}
+                  {(() => {
+                    const maxCount = Math.max(1, ...messageStats.channels.map(c => c.inbound + c.outbound));
+                    return messageStats.channels.map(c => (
+                      <div key={c.name}>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="text-[10px] text-cyan-400/80 font-mono truncate">{c.name}</span>
+                          <span className="text-[10px] text-slate-500 font-mono tabular-nums ml-2">
+                            <span className="text-blue-400/70">{c.inbound}</span>
+                            <span className="text-slate-700 mx-0.5">/</span>
+                            <span className="text-emerald-400/70">{c.outbound}</span>
+                          </span>
+                        </div>
+                        <div className="bg-slate-800/40 h-[6px] rounded-[2px] overflow-hidden flex">
+                          {c.inbound > 0 && <div className="h-full bg-cyan-500/50" style={{ width: `${(c.inbound / maxCount) * 100}%` }} />}
+                          {c.outbound > 0 && <div className="h-full bg-emerald-500/50" style={{ width: `${(c.outbound / maxCount) * 100}%` }} />}
+                        </div>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+            </div>
+          )}
+          {messageAnalyticsOpen && !messageStats && (
+            <div className="p-6 flex items-center justify-center text-slate-600 text-xs font-mono">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin mr-2" /> Loading analytics...
+            </div>
+          )}
+        </div>
+
+        {/* ── Filter Bar ── */}
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <select value={messageLogChannel}
+            onChange={e => { setMessageLogChannel(e.target.value); setMessageLogPage(0); }}
+            className="bg-slate-900/60 border border-slate-700 text-slate-300 text-xs px-2.5 py-1.5 font-mono focus:outline-none focus:border-emerald-500">
+            <option value="">All Channels</option>
+            {relayState?.channels?.map(ch => (
+              <option key={ch.channelId} value={ch.channelId}>{ch.label || ch.channelId}</option>
+            ))}
+          </select>
+          <select value={messageLogDirection}
+            onChange={e => { setMessageLogDirection(e.target.value as '' | 'inbound' | 'outbound'); setMessageLogPage(0); }}
+            className="bg-slate-900/60 border border-slate-700 text-slate-300 text-xs px-2.5 py-1.5 font-mono focus:outline-none focus:border-emerald-500">
+            <option value="">All Directions</option>
+            <option value="inbound">Inbound</option>
+            <option value="outbound">Outbound</option>
+          </select>
+          <button type="button" onClick={() => void fetchMessageLog()} disabled={messageLogLoading}
+            className="p-1.5 border border-slate-700 text-emerald-400 hover:border-emerald-600 transition-colors">
+            <RefreshCw className={cn('w-3.5 h-3.5', messageLogLoading && 'animate-spin')} />
+          </button>
+          <label className="flex items-center gap-1.5 text-xs text-slate-500 ml-1 cursor-pointer select-none">
+            <input type="checkbox" checked={messageLogAutoRefresh} onChange={e => setMessageLogAutoRefresh(e.target.checked)}
+              className="accent-emerald-500" />
+            <span className="tracking-wider uppercase text-[10px]">Auto-refresh</span>
+            {messageLogAutoRefresh && <span className="text-emerald-500 text-[10px]">(10s)</span>}
+          </label>
+          <span className="flex-1" />
+          <span className="text-[10px] text-slate-500 font-mono tabular-nums">{messageLogTotal} total</span>
+        </div>
+
+        {/* ── Message Table ── */}
+        <div className="flex-1 min-h-0 flex flex-col">
+          <div className="flex-1 overflow-y-auto border border-slate-800 bg-slate-900/30">
+            {messageLogRows.length === 0 && !messageLogLoading && (
+              <div className="py-12 text-center text-slate-600 text-xs">No messages found</div>
+            )}
+            {messageLogLoading && messageLogRows.length === 0 && (
+              <div className="py-12 text-center text-slate-600 text-xs flex items-center justify-center gap-2">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Loading...
+              </div>
+            )}
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-slate-900/95 backdrop-blur-sm z-10">
+                <tr className="text-slate-500 text-left">
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Time</th>
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Channel</th>
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Direction</th>
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Sender</th>
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Content</th>
+                </tr>
+              </thead>
+              <tbody>
+                {messageLogRows.map(msg => {
+                  const isExpanded = expandedMessageId === msg.id;
+                  return (
+                    <tr key={msg.id} onClick={() => setExpandedMessageId(isExpanded ? null : msg.id)}
+                      className={cn('border-t border-slate-800/60 hover:bg-slate-800/30 transition-colors cursor-pointer',
+                        isExpanded && 'bg-slate-800/20')}>
+                      <td className="px-3 py-2 text-slate-500 whitespace-nowrap tabular-nums align-top w-[100px]"
+                        title={new Date(msg.timestamp).toLocaleString()}>
+                        {relativeTime(msg.timestamp)}
+                      </td>
+                      <td className="px-3 py-2 text-cyan-400 font-mono align-top w-[70px]">{msg.channel_id}</td>
+                      <td className="px-3 py-2 align-top whitespace-nowrap w-[60px]">
+                        <span className={cn('inline-block w-1.5 h-1.5 rounded-full mr-1.5', msg.direction === 'inbound' ? 'bg-blue-400' : 'bg-emerald-400')} />
+                        <span className={msg.direction === 'inbound' ? 'text-blue-400' : 'text-emerald-400'}>
+                          {msg.direction === 'inbound' ? '\u2191 IN' : '\u2193 OUT'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-slate-400 font-mono align-top w-[80px]">{msg.sender_id || msg.agent_id || '\u2014'}</td>
+                      <td className="px-3 py-2 text-slate-300 align-top">
+                        {isExpanded ? (
+                          <pre className="whitespace-pre-wrap break-all font-mono text-xs text-slate-200 max-h-60 overflow-y-auto">{msg.content || '\u2014'}</pre>
+                        ) : (
+                          <span className="truncate block" title={msg.content || ''}>{msg.content?.slice(0, 200) || '\u2014'}</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* ── Pagination ── */}
+          <div className="flex items-center justify-between pt-3 shrink-0">
+            <button type="button" onClick={() => setMessageLogPage(p => Math.max(0, p - 1))} disabled={messageLogPage === 0 || messageLogLoading}
+              className="px-3 py-1.5 border border-slate-700 text-slate-400 hover:text-cyan-400 hover:border-cyan-700 transition-colors text-xs flex items-center gap-1.5 disabled:opacity-30 disabled:cursor-not-allowed">
+              <ChevronLeft className="w-3 h-3" /> Previous
+            </button>
+            <span className="text-[10px] text-slate-500 font-mono tabular-nums tracking-wider">
+              PAGE {messageLogPage + 1} / {Math.max(1, Math.ceil(messageLogTotal / MESSAGE_PAGE_SIZE))}
+            </span>
+            <button type="button" onClick={() => setMessageLogPage(p => p + 1)} disabled={(messageLogPage + 1) * MESSAGE_PAGE_SIZE >= messageLogTotal || messageLogLoading}
+              className="px-3 py-1.5 border border-slate-700 text-slate-400 hover:text-cyan-400 hover:border-cyan-700 transition-colors text-xs flex items-center gap-1.5 disabled:opacity-30 disabled:cursor-not-allowed">
+              Next <ChevronRight className="w-3 h-3" />
+            </button>
+          </div>
+        </div>
+        </>)}
       </main>
     </div>
   );
