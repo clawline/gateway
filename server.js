@@ -237,6 +237,158 @@ function persistMessage(channelId, event, direction, senderId) {
   });
 }
 
+// ── AI Settings & LLM helpers ──
+
+const DEFAULT_SUGGESTION_PROMPT = `You are a helpful assistant that generates follow-up questions and suggestions based on the conversation. Return a JSON array of 5-8 short suggestions (under 25 characters each). Match the language of the conversation. Return ONLY a valid JSON array, no other text.`;
+
+const DEFAULT_VOICE_REFINE_PROMPT = `You are a text refinement assistant. The user dictated a message via voice recognition which may contain errors, filler words, or awkward phrasing. Clean up the text while preserving the original meaning and intent. Fix grammar, remove filler words, and improve clarity. Match the original language. Return ONLY the refined text, nothing else.`;
+
+let aiSettingsCache = null;
+let aiSettingsCacheTime = 0;
+const AI_SETTINGS_CACHE_TTL = 30_000; // 30s
+
+async function loadAiSettings() {
+  if (aiSettingsCache && Date.now() - aiSettingsCacheTime < AI_SETTINGS_CACHE_TTL) {
+    return aiSettingsCache;
+  }
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) {
+    return { llmEndpoint: '', llmApiKey: '', llmModel: 'gpt-4.1', suggestionPrompt: '', voiceRefinePrompt: '' };
+  }
+  try {
+    const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_settings?key=eq.ai&select=value`, {
+      headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` },
+    });
+    if (res.ok) {
+      const rows = await res.json();
+      if (rows.length > 0 && rows[0].value) {
+        aiSettingsCache = rows[0].value;
+        aiSettingsCacheTime = Date.now();
+        return aiSettingsCache;
+      }
+    }
+  } catch { /* fall through */ }
+  return { llmEndpoint: '', llmApiKey: '', llmModel: 'gpt-4.1', suggestionPrompt: '', voiceRefinePrompt: '' };
+}
+
+async function saveAiSettings(updates) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) throw new Error('Supabase not configured');
+
+  const current = await loadAiSettings();
+  const merged = { ...current, ...updates };
+
+  await fetch(`${supabaseUrl}/pg/rest/v1/cl_settings`, {
+    method: 'POST',
+    headers: {
+      apikey: supabaseKey,
+      authorization: `Bearer ${supabaseKey}`,
+      'content-type': 'application/json',
+      prefer: 'resolution=merge-duplicates',
+    },
+    body: JSON.stringify({ key: 'ai', value: merged }),
+  });
+
+  aiSettingsCache = merged;
+  aiSettingsCacheTime = Date.now();
+}
+
+function buildFinalPrompt(globalPrompt, userPrompt) {
+  const parts = [globalPrompt, userPrompt].filter(Boolean);
+  return parts.join('\n\n');
+}
+
+async function callLlm(settings, systemPrompt, messages, opts) {
+  const endpoint = settings.llmEndpoint || process.env.LLM_ENDPOINT || 'https://models.inference.ai.azure.com';
+  const apiKey = settings.llmApiKey || process.env.LLM_API_KEY || '';
+  const model = settings.llmModel || process.env.LLM_MODEL || 'gpt-4.1';
+
+  if (!apiKey) throw new Error('LLM API key not configured. Set it in Admin > AI Settings.');
+
+  const llmMessages = [{ role: 'system', content: systemPrompt }];
+
+  // Add conversation context (last 6 messages)
+  for (const m of messages.slice(-6)) {
+    llmMessages.push({
+      role: m.role === 'user' ? 'user' : 'assistant',
+      content: typeof m.text === 'string' ? m.text.slice(0, 300) : String(m.content || m.text || '').slice(0, 300),
+    });
+  }
+
+  // Add task-specific final prompt
+  if (opts.type === 'voice-refine') {
+    llmMessages.push({ role: 'user', content: `Refine this voice transcript:\n\n${opts.text}` });
+  } else if (opts.type === 'suggestions') {
+    llmMessages.push({ role: 'user', content: 'Generate follow-up suggestions based on the conversation above.' });
+  }
+
+  // Detect Azure OpenAI vs standard OpenAI-compatible
+  let url;
+  if (endpoint.includes('.openai.azure.com')) {
+    url = `${endpoint}/openai/deployments/${model}/chat/completions?api-version=2025-01-01-preview`;
+  } else {
+    url = `${endpoint.replace(/\/+$/, '')}/chat/completions`;
+  }
+
+  const headers = { 'content-type': 'application/json' };
+  if (endpoint.includes('.openai.azure.com')) {
+    headers['api-key'] = apiKey;
+  } else {
+    headers['authorization'] = `Bearer ${apiKey}`;
+  }
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ model, messages: llmMessages, temperature: 0.7, max_tokens: 512 }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`LLM request failed: ${res.status} ${errText.slice(0, 200)}`);
+  }
+
+  const data = await res.json();
+  const content = data.choices?.[0]?.message?.content?.trim() || '';
+
+  if (opts.type === 'suggestions') {
+    // Parse JSON array from response
+    try {
+      const match = content.match(/\[[\s\S]*\]/);
+      return match ? JSON.parse(match[0]).filter(s => typeof s === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+
+  // voice-refine: return plain text
+  return content;
+}
+
+/** Auth check: allow admin token, Logto JWT, OR channel user token */
+async function requireAuthAny(request, response, url) {
+  // Try admin auth first
+  const headerToken = normalizeNonEmpty(request.headers["x-relay-admin-token"]);
+  const queryToken = normalizeNonEmpty(url.searchParams.get("adminToken"));
+  if (safeCompare(headerToken, adminToken) || safeCompare(queryToken, adminToken)) return true;
+  if (await verifyBearerToken(request)) return true;
+
+  // Try channel user token
+  const bearer = normalizeNonEmpty(request.headers["authorization"]?.replace(/^Bearer\s+/, ""));
+  const token = queryToken || bearer;
+  if (token) {
+    const cfg = await relayStore.loadConfig();
+    if (Object.values(cfg?.channels || {}).some(ch => ch.users?.some(u => safeCompare(u.token, token)))) {
+      return true;
+    }
+  }
+
+  writeJson(response, 401, { ok: false, error: "auth required" });
+  return false;
+}
+
 function maskSecret(value) {
   const secret = normalizeNonEmpty(value);
   if (!secret) {
@@ -1009,6 +1161,83 @@ server.on("request", async (request, response) => {
       writeJson(response, 200, { ok: true, settings: config.settings });
     } catch (err) {
       writeJson(response, 400, { ok: false, error: String(err.message || err) });
+    }
+    return;
+  }
+
+  // ── AI Settings API (admin — global prompts & LLM config) ──
+
+  if (pathname === "/api/ai-settings" && request.method === "GET") {
+    if (!(await requireAdmin(request, response, url))) return;
+    try {
+      const settings = await loadAiSettings();
+      writeJson(response, 200, { ok: true, ...settings });
+    } catch (err) {
+      writeJson(response, 500, { ok: false, error: String(err.message || err) });
+    }
+    return;
+  }
+
+  if (pathname === "/api/ai-settings" && request.method === "PUT") {
+    if (!(await requireAdmin(request, response, url))) return;
+    try {
+      const body = JSON.parse(await parseRawBody(request, 64 * 1024));
+      await saveAiSettings(body);
+      writeJson(response, 200, { ok: true });
+    } catch (err) {
+      writeJson(response, 400, { ok: false, error: String(err.message || err) });
+    }
+    return;
+  }
+
+  // ── POST /api/suggestions — AI-powered follow-up suggestions ──
+
+  if (pathname === "/api/suggestions" && request.method === "POST") {
+    if (!(await requireAuthAny(request, response, url))) return;
+    try {
+      const body = JSON.parse(await parseRawBody(request, 128 * 1024));
+      const messages = Array.isArray(body.messages) ? body.messages : [];
+      const userPrompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+
+      const settings = await loadAiSettings();
+      const systemPrompt = buildFinalPrompt(
+        settings.suggestionPrompt || DEFAULT_SUGGESTION_PROMPT,
+        userPrompt,
+      );
+
+      const suggestions = await callLlm(settings, systemPrompt, messages, { type: 'suggestions' });
+      writeJson(response, 200, { ok: true, suggestions });
+    } catch (err) {
+      writeJson(response, 500, { ok: false, error: String(err.message || err) });
+    }
+    return;
+  }
+
+  // ── POST /api/voice-refine — refine voice transcript with AI ──
+
+  if (pathname === "/api/voice-refine" && request.method === "POST") {
+    if (!(await requireAuthAny(request, response, url))) return;
+    try {
+      const body = JSON.parse(await parseRawBody(request, 128 * 1024));
+      const text = typeof body.text === 'string' ? body.text : '';
+      const messages = Array.isArray(body.messages) ? body.messages : [];
+      const userPrompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+
+      if (!text.trim()) {
+        writeJson(response, 400, { ok: false, error: 'text is required' });
+        return;
+      }
+
+      const settings = await loadAiSettings();
+      const systemPrompt = buildFinalPrompt(
+        settings.voiceRefinePrompt || DEFAULT_VOICE_REFINE_PROMPT,
+        userPrompt,
+      );
+
+      const refined = await callLlm(settings, systemPrompt, messages, { type: 'voice-refine', text });
+      writeJson(response, 200, { ok: true, refined });
+    } catch (err) {
+      writeJson(response, 500, { ok: false, error: String(err.message || err) });
     }
     return;
   }

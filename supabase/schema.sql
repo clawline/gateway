@@ -68,3 +68,17 @@ create index if not exists cl_messages_channel_ts_idx
 
 create index if not exists cl_messages_sender_idx
   on public.cl_messages (channel_id, sender_id, timestamp desc);
+
+-- ── Settings (key-value store for global prompts, LLM config, etc.) ──
+
+create table if not exists public.cl_settings (
+  key text primary key,
+  value jsonb not null default '{}',
+  updated_at timestamptz not null default now()
+);
+
+drop trigger if exists cl_settings_set_updated_at on public.cl_settings;
+create trigger cl_settings_set_updated_at
+before update on public.cl_settings
+for each row
+execute function public.cl_set_updated_at();
