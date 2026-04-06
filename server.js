@@ -1284,7 +1284,7 @@ server.on("request", async (request, response) => {
         const end = now - i * hourMs;
         const inH = rows.filter(r => r.timestamp >= start && r.timestamp < end);
         hourly.push({
-          hour: new Date(end).toISOString().slice(11, 16),
+          hour: new Date(end).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false }),
           inbound: inH.filter(r => r.direction === 'inbound').length,
           outbound: inH.filter(r => r.direction === 'outbound').length,
         });

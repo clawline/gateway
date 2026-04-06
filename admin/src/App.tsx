@@ -1582,81 +1582,110 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
           </button>
           {messageAnalyticsOpen && messageStats && (
             <div className="p-3 grid grid-cols-1 lg:grid-cols-3 gap-3">
-              {/* Messages per hour — bar chart */}
+              {/* Messages per hour — thin bar chart with grid */}
               <div className="bg-slate-950/60 border border-slate-800 flex flex-col overflow-hidden">
                 <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80">
-                  <BarChart3 className="w-3.5 h-3.5 text-amber-500" strokeWidth={1.8} />
-                  <span className="text-[11px] font-medium text-slate-400 tracking-widest uppercase">MESSAGES / HOUR (24H)</span>
+                  <BarChart3 className="w-3.5 h-3.5 text-cyan-500/80" strokeWidth={1.8} />
+                  <span className="text-[10px] font-medium text-slate-500 tracking-[0.2em] uppercase">Messages / Hour</span>
+                  <span className="flex-1" />
+                  <span className="text-[9px] text-slate-600 font-mono">24H</span>
                 </div>
-                <div className="px-3 py-2 flex items-end gap-[2px] h-[120px]">
-                  {(() => {
-                    const maxVal = Math.max(1, ...messageStats.hourly.map(h => h.inbound + h.outbound));
-                    return messageStats.hourly.map((h, i) => {
-                      const total = h.inbound + h.outbound;
-                      const pct = (total / maxVal) * 100;
-                      const inPct = total > 0 ? (h.inbound / total) * 100 : 0;
-                      return (
-                        <div key={i} className="flex-1 flex flex-col items-stretch justify-end h-full group relative">
-                          <div className="absolute -top-6 left-1/2 -translate-x-1/2 hidden group-hover:block bg-slate-800 text-[9px] text-slate-300 px-1.5 py-0.5 whitespace-nowrap z-10 font-mono">
-                            {h.hour} · ↑{h.inbound} ↓{h.outbound}
+                <div className="px-3 pt-3 pb-1 relative">
+                  {/* Grid lines */}
+                  <div className="absolute inset-x-3 top-3 bottom-6 flex flex-col justify-between pointer-events-none">
+                    {[0, 1, 2, 3].map(i => <div key={i} className="border-t border-slate-800/50" />)}
+                  </div>
+                  {/* Bars */}
+                  <div className="flex items-end gap-[1px] h-[100px] relative">
+                    {(() => {
+                      const maxVal = Math.max(1, ...messageStats.hourly.map(h => h.inbound + h.outbound));
+                      return messageStats.hourly.map((h, i) => {
+                        const total = h.inbound + h.outbound;
+                        const pct = (total / maxVal) * 100;
+                        return (
+                          <div key={i} className="flex-1 flex flex-col items-center justify-end h-full group relative">
+                            <div className="absolute -top-5 left-1/2 -translate-x-1/2 hidden group-hover:block bg-slate-900 border border-slate-700 text-[8px] text-slate-300 px-1.5 py-0.5 whitespace-nowrap z-10 font-mono shadow-lg">
+                              {h.hour} · <span className="text-blue-400">↑{h.inbound}</span> <span className="text-emerald-400">↓{h.outbound}</span>
+                            </div>
+                            {total > 0 ? (
+                              <div style={{ height: `${Math.max(pct, 2)}%` }} className="w-full flex flex-col justify-end overflow-hidden">
+                                {h.outbound > 0 && <div style={{ flex: h.outbound }} className="bg-emerald-500/50 group-hover:bg-emerald-400/70 transition-colors min-h-[1px]" />}
+                                {h.inbound > 0 && <div style={{ flex: h.inbound }} className="bg-cyan-500/50 group-hover:bg-cyan-400/70 transition-colors min-h-[1px]" />}
+                              </div>
+                            ) : (
+                              <div className="w-full h-[1px] bg-slate-800/80" />
+                            )}
                           </div>
-                          <div style={{ height: `${Math.max(pct, 1)}%` }} className="flex flex-col justify-end overflow-hidden rounded-sm min-h-[2px]">
-                            <div style={{ height: `${100 - inPct}%` }} className="bg-emerald-500/70 min-h-0" />
-                            <div style={{ height: `${inPct}%` }} className="bg-blue-500/70 min-h-0" />
-                          </div>
-                          {i % 6 === 0 && <span className="text-[8px] text-slate-600 text-center mt-1 font-mono">{h.hour}</span>}
-                        </div>
-                      );
-                    });
-                  })()}
+                        );
+                      });
+                    })()}
+                  </div>
+                  {/* Time labels */}
+                  <div className="flex mt-1.5">
+                    {messageStats.hourly.map((h, i) => (
+                      <div key={i} className="flex-1 text-center">
+                        {i % 4 === 0 && <span className="text-[7px] text-slate-600 font-mono">{h.hour}</span>}
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <div className="px-3 pb-2 flex gap-3 text-[9px] text-slate-500">
-                  <span className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500/70 rounded-sm" /> Inbound</span>
-                  <span className="flex items-center gap-1"><span className="w-2 h-2 bg-emerald-500/70 rounded-sm" /> Outbound</span>
+                <div className="px-3 pb-2 flex gap-4 text-[9px] text-slate-600">
+                  <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 bg-cyan-500/60 rounded-[1px]" /> In</span>
+                  <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 bg-emerald-500/60 rounded-[1px]" /> Out</span>
                 </div>
               </div>
 
-              {/* Model usage — horizontal bar chart */}
+              {/* Model usage — horizontal bars with glow */}
               <div className="bg-slate-950/60 border border-slate-800 flex flex-col overflow-hidden">
                 <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80">
-                  <Activity className="w-3.5 h-3.5 text-amber-500" strokeWidth={1.8} />
-                  <span className="text-[11px] font-medium text-slate-400 tracking-widest uppercase">MODEL USAGE</span>
+                  <Activity className="w-3.5 h-3.5 text-cyan-500/80" strokeWidth={1.8} />
+                  <span className="text-[10px] font-medium text-slate-500 tracking-[0.2em] uppercase">Model Usage</span>
                 </div>
-                <div className="px-3 py-2 space-y-1.5 max-h-[140px] overflow-y-auto">
-                  {messageStats.models.length === 0 && <div className="text-slate-600 text-xs py-4 text-center font-mono">No model data</div>}
+                <div className="px-3 py-3 space-y-2.5 max-h-[160px] overflow-y-auto">
+                  {messageStats.models.length === 0 && <div className="text-slate-600 text-[10px] py-4 text-center font-mono">No model data</div>}
                   {(() => {
                     const maxCount = Math.max(1, ...messageStats.models.map(m => m.count));
-                    return messageStats.models.map(m => (
-                      <div key={m.name} className="flex items-center gap-2">
-                        <span className="text-[10px] text-slate-400 font-mono w-[140px] truncate shrink-0" title={m.name}>{m.name.split('/').pop()}</span>
-                        <div className="flex-1 bg-slate-800/50 h-3 rounded-sm overflow-hidden">
-                          <div className="h-full bg-cyan-500/60 rounded-sm" style={{ width: `${(m.count / maxCount) * 100}%` }} />
+                    const colors = ['bg-cyan-500/50', 'bg-fuchsia-500/50', 'bg-amber-500/50', 'bg-emerald-500/50', 'bg-blue-500/50'];
+                    return messageStats.models.map((m, i) => (
+                      <div key={m.name}>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="text-[10px] text-slate-400 font-mono truncate" title={m.name}>{m.name.split('/').pop()}</span>
+                          <span className="text-[10px] text-slate-500 font-mono tabular-nums ml-2">{m.count}</span>
                         </div>
-                        <span className="text-[10px] text-slate-500 font-mono tabular-nums w-6 text-right">{m.count}</span>
+                        <div className="bg-slate-800/40 h-[6px] rounded-[2px] overflow-hidden">
+                          <div className={cn('h-full rounded-[2px] transition-all', colors[i % colors.length])}
+                            style={{ width: `${(m.count / maxCount) * 100}%` }} />
+                        </div>
                       </div>
                     ));
                   })()}
                 </div>
               </div>
 
-              {/* Channel distribution — horizontal bars */}
+              {/* Channel distribution — horizontal stacked bars */}
               <div className="bg-slate-950/60 border border-slate-800 flex flex-col overflow-hidden">
                 <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80">
-                  <Network className="w-3.5 h-3.5 text-amber-500" strokeWidth={1.8} />
-                  <span className="text-[11px] font-medium text-slate-400 tracking-widest uppercase">CHANNEL ACTIVITY</span>
+                  <Network className="w-3.5 h-3.5 text-cyan-500/80" strokeWidth={1.8} />
+                  <span className="text-[10px] font-medium text-slate-500 tracking-[0.2em] uppercase">Channel Activity</span>
                 </div>
-                <div className="px-3 py-2 space-y-1.5 max-h-[140px] overflow-y-auto">
-                  {messageStats.channels.length === 0 && <div className="text-slate-600 text-xs py-4 text-center font-mono">No data</div>}
+                <div className="px-3 py-3 space-y-2.5 max-h-[160px] overflow-y-auto">
+                  {messageStats.channels.length === 0 && <div className="text-slate-600 text-[10px] py-4 text-center font-mono">No data</div>}
                   {(() => {
                     const maxCount = Math.max(1, ...messageStats.channels.map(c => c.inbound + c.outbound));
                     return messageStats.channels.map(c => (
-                      <div key={c.name} className="flex items-center gap-2">
-                        <span className="text-[10px] text-cyan-400 font-mono w-[80px] truncate shrink-0">{c.name}</span>
-                        <div className="flex-1 bg-slate-800/50 h-3 rounded-sm overflow-hidden flex">
-                          <div className="h-full bg-blue-500/60" style={{ width: `${(c.inbound / maxCount) * 100}%` }} />
-                          <div className="h-full bg-emerald-500/60" style={{ width: `${(c.outbound / maxCount) * 100}%` }} />
+                      <div key={c.name}>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="text-[10px] text-cyan-400/80 font-mono truncate">{c.name}</span>
+                          <span className="text-[10px] text-slate-500 font-mono tabular-nums ml-2">
+                            <span className="text-blue-400/70">{c.inbound}</span>
+                            <span className="text-slate-700 mx-0.5">/</span>
+                            <span className="text-emerald-400/70">{c.outbound}</span>
+                          </span>
                         </div>
-                        <span className="text-[10px] text-slate-500 font-mono tabular-nums w-8 text-right">{c.inbound + c.outbound}</span>
+                        <div className="bg-slate-800/40 h-[6px] rounded-[2px] overflow-hidden flex">
+                          {c.inbound > 0 && <div className="h-full bg-cyan-500/50" style={{ width: `${(c.inbound / maxCount) * 100}%` }} />}
+                          {c.outbound > 0 && <div className="h-full bg-emerald-500/50" style={{ width: `${(c.outbound / maxCount) * 100}%` }} />}
+                        </div>
                       </div>
                     ));
                   })()}
