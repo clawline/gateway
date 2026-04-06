@@ -229,7 +229,7 @@ function persistMessage(channelId, event, direction, senderId) {
       apikey: supabaseKey,
       authorization: `Bearer ${supabaseKey}`,
       'content-type': 'application/json',
-      prefer: 'return=minimal',
+      prefer: 'return=minimal,resolution=ignore-duplicates',
     },
     body: JSON.stringify(row),
   }).catch((err) => {
