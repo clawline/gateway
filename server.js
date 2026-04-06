@@ -1235,11 +1235,13 @@ server.on("request", async (request, response) => {
     }
     try {
       const channelId = url.searchParams.get('channelId') || '';
+      const direction = url.searchParams.get('direction') || '';
       const limit = Math.min(Number(url.searchParams.get('limit')) || 50, 200);
       const offset = Number(url.searchParams.get('offset')) || 0;
 
-      let filter = `select=id,channel_id,sender_id,agent_id,message_id,content,content_type,direction,media_url,timestamp,created_at&order=timestamp.desc&limit=${limit}&offset=${offset}`;
+      let filter = `select=id,channel_id,sender_id,agent_id,message_id,content,content_type,direction,media_url,meta,timestamp,created_at&order=timestamp.desc&limit=${limit}&offset=${offset}`;
       if (channelId) filter += `&channel_id=eq.${encodeURIComponent(channelId)}`;
+      if (direction === 'inbound' || direction === 'outbound') filter += `&direction=eq.${direction}`;
 
       const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_messages?${filter}`, {
         headers: {
@@ -1251,6 +1253,67 @@ server.on("request", async (request, response) => {
       const rows = await res.json();
       const total = Number(res.headers.get('content-range')?.split('/')?.[1] || rows.length);
       writeJson(response, 200, { ok: true, messages: rows, total });
+    } catch (err) {
+      writeJson(response, 500, { ok: false, error: String(err.message || err) });
+    }
+    return;
+  }
+
+  // ── GET /api/messages/stats — aggregated stats for charts ──
+
+  if (pathname === "/api/messages/stats" && request.method === "GET") {
+    if (!(await requireAdmin(request, response, url))) return;
+    const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+    const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+    if (!supabaseUrl || !supabaseKey) {
+      writeJson(response, 200, { ok: true, hourly: [], models: [], channels: [] });
+      return;
+    }
+    try {
+      const headers = { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` };
+      // Fetch last 500 messages for stats (covers ~24h for active channels)
+      const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_messages?select=channel_id,direction,content_type,meta,timestamp&order=timestamp.desc&limit=500`, { headers });
+      const rows = await res.json();
+
+      // Hourly message counts (last 24h, bucketed by hour)
+      const now = Date.now();
+      const hourMs = 3600000;
+      const hourly = [];
+      for (let i = 23; i >= 0; i--) {
+        const start = now - (i + 1) * hourMs;
+        const end = now - i * hourMs;
+        const inH = rows.filter(r => r.timestamp >= start && r.timestamp < end);
+        hourly.push({
+          hour: new Date(end).toISOString().slice(11, 16),
+          inbound: inH.filter(r => r.direction === 'inbound').length,
+          outbound: inH.filter(r => r.direction === 'outbound').length,
+        });
+      }
+
+      // Model usage (from meta.model on outbound messages)
+      const modelCounts = {};
+      for (const r of rows) {
+        if (r.direction !== 'outbound') continue;
+        let model = null;
+        try { model = typeof r.meta === 'string' ? JSON.parse(r.meta)?.model : r.meta?.model; } catch { /* skip */ }
+        if (model) modelCounts[model] = (modelCounts[model] || 0) + 1;
+      }
+      const models = Object.entries(modelCounts)
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count);
+
+      // Per-channel counts
+      const channelCounts = {};
+      for (const r of rows) {
+        const key = r.channel_id;
+        if (!channelCounts[key]) channelCounts[key] = { inbound: 0, outbound: 0 };
+        channelCounts[key][r.direction === 'inbound' ? 'inbound' : 'outbound']++;
+      }
+      const channels = Object.entries(channelCounts)
+        .map(([name, c]) => ({ name, ...c }))
+        .sort((a, b) => (b.inbound + b.outbound) - (a.inbound + a.outbound));
+
+      writeJson(response, 200, { ok: true, hourly, models, channels });
     } catch (err) {
       writeJson(response, 500, { ok: false, error: String(err.message || err) });
     }

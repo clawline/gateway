@@ -812,7 +812,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
   }, [activeRelay, aiSettings]);
 
   // ── Message Log ──
-  type MessageRow = { id: string; channel_id: string; sender_id: string | null; agent_id: string | null; content: string | null; content_type: string; direction: string; timestamp: number; created_at: string };
+  type MessageRow = { id: string; channel_id: string; sender_id: string | null; agent_id: string | null; content: string | null; content_type: string; direction: string; meta: string | null; timestamp: number; created_at: string };
   const [currentView, setCurrentView] = useState<'dashboard' | 'messages'>('dashboard');
   const [messageLogRows, setMessageLogRows] = useState<MessageRow[]>([]);
   const [messageLogTotal, setMessageLogTotal] = useState(0);
@@ -822,8 +822,11 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
   const [messageLogDirection, setMessageLogDirection] = useState<'' | 'inbound' | 'outbound'>('');
   const [messageLogAutoRefresh, setMessageLogAutoRefresh] = useState(false);
   const [expandedMessageId, setExpandedMessageId] = useState<string | null>(null);
-  const [messageAnalyticsOpen, setMessageAnalyticsOpen] = useState(false);
+  const [messageAnalyticsOpen, setMessageAnalyticsOpen] = useState(true);
   const MESSAGE_PAGE_SIZE = 50;
+
+  type StatsData = { hourly: { hour: string; inbound: number; outbound: number }[]; models: { name: string; count: number }[]; channels: { name: string; inbound: number; outbound: number }[] };
+  const [messageStats, setMessageStats] = useState<StatsData | null>(null);
 
   const fetchMessageLog = useCallback(async (opts?: { channel?: string; direction?: string; page?: number }) => {
     setMessageLogLoading(true);
@@ -833,12 +836,19 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
       const pg = opts?.page ?? messageLogPage;
       const params = new URLSearchParams({ limit: String(MESSAGE_PAGE_SIZE), offset: String(pg * MESSAGE_PAGE_SIZE) });
       if (ch) params.set('channelId', ch);
-      if (dir) params.set('direction', `eq.${dir}`);
+      if (dir) params.set('direction', dir);
       const data = await apiFetch<{ ok: boolean; messages: MessageRow[]; total: number }>(`/api/messages?${params}`, activeRelay, undefined);
       if (data.ok) { setMessageLogRows(data.messages); setMessageLogTotal(data.total); }
     } catch { /* ignore */ }
     setMessageLogLoading(false);
   }, [activeRelay, messageLogChannel, messageLogDirection, messageLogPage]);
+
+  const fetchMessageStats = useCallback(async () => {
+    try {
+      const data = await apiFetch<{ ok: boolean } & StatsData>('/api/messages/stats', activeRelay, undefined);
+      if (data.ok) setMessageStats(data);
+    } catch { /* ignore */ }
+  }, [activeRelay]);
 
 
   const updateRelayNodes = async (next: RelayNode[]) => {
@@ -967,7 +977,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
 
   // Refetch when page/direction/channel changes
   useEffect(() => {
-    if (currentView === 'messages') { void fetchMessageLog(); }
+    if (currentView === 'messages') { void fetchMessageLog(); void fetchMessageStats(); }
   }, [messageLogPage, messageLogDirection, messageLogChannel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Diagnostic ─────────────────────────────────────────────
@@ -1115,7 +1125,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
               className="p-1.5 border border-slate-700 text-amber-400 hover:text-amber-300 hover:border-amber-600 transition-colors" title="AI Settings">
               <Sparkles className="w-3.5 h-3.5" strokeWidth={1.8} />
             </button>
-            <button type="button" onClick={() => { if (currentView === 'messages') { setCurrentView('dashboard'); } else { setCurrentView('messages'); void fetchMessageLog(); } }}
+            <button type="button" onClick={() => { if (currentView === 'messages') { setCurrentView('dashboard'); } else { setCurrentView('messages'); void fetchMessageLog(); void fetchMessageStats(); } }}
               className={cn('p-1.5 border transition-colors', currentView === 'messages' ? 'border-emerald-500 text-emerald-300 bg-emerald-950/40' : 'border-slate-700 text-emerald-400 hover:text-emerald-300 hover:border-emerald-600')} title="Message Log">
               <MessageSquare className="w-3.5 h-3.5" strokeWidth={1.8} />
             </button>
@@ -1368,7 +1378,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
               currentView === 'dashboard' ? 'border-cyan-500 text-cyan-400' : 'border-transparent text-slate-500 hover:text-slate-300')}>
             <div className="flex items-center gap-1.5"><Server className="w-3.5 h-3.5" /> Dashboard</div>
           </button>
-          <button type="button" onClick={() => { setCurrentView('messages'); void fetchMessageLog(); }}
+          <button type="button" onClick={() => { setCurrentView('messages'); void fetchMessageLog(); void fetchMessageStats(); }}
             className={cn('px-4 py-2 text-xs font-medium tracking-widest uppercase border-b-2 transition-colors',
               currentView === 'messages' ? 'border-emerald-500 text-emerald-400' : 'border-transparent text-slate-500 hover:text-slate-300')}>
             <div className="flex items-center gap-1.5"><MessageSquare className="w-3.5 h-3.5" /> Messages</div>
@@ -1561,7 +1571,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
           );
         })()}
 
-        {/* ── Analytics Section (collapsible, placeholder) ── */}
+        {/* ── Analytics Section (collapsible) ── */}
         <div className="bg-slate-900/50 border border-slate-800 shrink-0">
           <button type="button" onClick={() => setMessageAnalyticsOpen(!messageAnalyticsOpen)}
             className="w-full flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80 hover:bg-slate-900 transition-colors">
@@ -1570,23 +1580,93 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
             <span className="flex-1" />
             {messageAnalyticsOpen ? <ChevronUp className="w-3.5 h-3.5 text-slate-500" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-500" />}
           </button>
-          {messageAnalyticsOpen && (
+          {messageAnalyticsOpen && messageStats && (
             <div className="p-3 grid grid-cols-1 lg:grid-cols-3 gap-3">
-              {[
-                { title: 'MESSAGES_PER_HOUR', icon: BarChart3 },
-                { title: 'TOP_CHANNELS', icon: Network },
-                { title: 'INBOUND_VS_OUTBOUND', icon: Radio },
-              ].map(card => (
-                <div key={card.title} className="bg-slate-950/60 border border-slate-800 flex flex-col overflow-hidden">
-                  <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80">
-                    <card.icon className="w-3.5 h-3.5 text-amber-500" strokeWidth={1.8} />
-                    <span className="text-[11px] font-medium text-slate-400 tracking-widest uppercase">{card.title}</span>
-                  </div>
-                  <div className="p-6 flex items-center justify-center text-slate-600 text-xs font-mono">
-                    Chart coming soon
-                  </div>
+              {/* Messages per hour — bar chart */}
+              <div className="bg-slate-950/60 border border-slate-800 flex flex-col overflow-hidden">
+                <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80">
+                  <BarChart3 className="w-3.5 h-3.5 text-amber-500" strokeWidth={1.8} />
+                  <span className="text-[11px] font-medium text-slate-400 tracking-widest uppercase">MESSAGES / HOUR (24H)</span>
                 </div>
-              ))}
+                <div className="px-3 py-2 flex items-end gap-[2px] h-[120px]">
+                  {(() => {
+                    const maxVal = Math.max(1, ...messageStats.hourly.map(h => h.inbound + h.outbound));
+                    return messageStats.hourly.map((h, i) => {
+                      const total = h.inbound + h.outbound;
+                      const pct = (total / maxVal) * 100;
+                      const inPct = total > 0 ? (h.inbound / total) * 100 : 0;
+                      return (
+                        <div key={i} className="flex-1 flex flex-col items-stretch justify-end h-full group relative">
+                          <div className="absolute -top-6 left-1/2 -translate-x-1/2 hidden group-hover:block bg-slate-800 text-[9px] text-slate-300 px-1.5 py-0.5 whitespace-nowrap z-10 font-mono">
+                            {h.hour} · ↑{h.inbound} ↓{h.outbound}
+                          </div>
+                          <div style={{ height: `${Math.max(pct, 1)}%` }} className="flex flex-col justify-end overflow-hidden rounded-sm min-h-[2px]">
+                            <div style={{ height: `${100 - inPct}%` }} className="bg-emerald-500/70 min-h-0" />
+                            <div style={{ height: `${inPct}%` }} className="bg-blue-500/70 min-h-0" />
+                          </div>
+                          {i % 6 === 0 && <span className="text-[8px] text-slate-600 text-center mt-1 font-mono">{h.hour}</span>}
+                        </div>
+                      );
+                    });
+                  })()}
+                </div>
+                <div className="px-3 pb-2 flex gap-3 text-[9px] text-slate-500">
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500/70 rounded-sm" /> Inbound</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 bg-emerald-500/70 rounded-sm" /> Outbound</span>
+                </div>
+              </div>
+
+              {/* Model usage — horizontal bar chart */}
+              <div className="bg-slate-950/60 border border-slate-800 flex flex-col overflow-hidden">
+                <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80">
+                  <Activity className="w-3.5 h-3.5 text-amber-500" strokeWidth={1.8} />
+                  <span className="text-[11px] font-medium text-slate-400 tracking-widest uppercase">MODEL USAGE</span>
+                </div>
+                <div className="px-3 py-2 space-y-1.5 max-h-[140px] overflow-y-auto">
+                  {messageStats.models.length === 0 && <div className="text-slate-600 text-xs py-4 text-center font-mono">No model data</div>}
+                  {(() => {
+                    const maxCount = Math.max(1, ...messageStats.models.map(m => m.count));
+                    return messageStats.models.map(m => (
+                      <div key={m.name} className="flex items-center gap-2">
+                        <span className="text-[10px] text-slate-400 font-mono w-[140px] truncate shrink-0" title={m.name}>{m.name.split('/').pop()}</span>
+                        <div className="flex-1 bg-slate-800/50 h-3 rounded-sm overflow-hidden">
+                          <div className="h-full bg-cyan-500/60 rounded-sm" style={{ width: `${(m.count / maxCount) * 100}%` }} />
+                        </div>
+                        <span className="text-[10px] text-slate-500 font-mono tabular-nums w-6 text-right">{m.count}</span>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+
+              {/* Channel distribution — horizontal bars */}
+              <div className="bg-slate-950/60 border border-slate-800 flex flex-col overflow-hidden">
+                <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80">
+                  <Network className="w-3.5 h-3.5 text-amber-500" strokeWidth={1.8} />
+                  <span className="text-[11px] font-medium text-slate-400 tracking-widest uppercase">CHANNEL ACTIVITY</span>
+                </div>
+                <div className="px-3 py-2 space-y-1.5 max-h-[140px] overflow-y-auto">
+                  {messageStats.channels.length === 0 && <div className="text-slate-600 text-xs py-4 text-center font-mono">No data</div>}
+                  {(() => {
+                    const maxCount = Math.max(1, ...messageStats.channels.map(c => c.inbound + c.outbound));
+                    return messageStats.channels.map(c => (
+                      <div key={c.name} className="flex items-center gap-2">
+                        <span className="text-[10px] text-cyan-400 font-mono w-[80px] truncate shrink-0">{c.name}</span>
+                        <div className="flex-1 bg-slate-800/50 h-3 rounded-sm overflow-hidden flex">
+                          <div className="h-full bg-blue-500/60" style={{ width: `${(c.inbound / maxCount) * 100}%` }} />
+                          <div className="h-full bg-emerald-500/60" style={{ width: `${(c.outbound / maxCount) * 100}%` }} />
+                        </div>
+                        <span className="text-[10px] text-slate-500 font-mono tabular-nums w-8 text-right">{c.inbound + c.outbound}</span>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+            </div>
+          )}
+          {messageAnalyticsOpen && !messageStats && (
+            <div className="p-6 flex items-center justify-center text-slate-600 text-xs font-mono">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin mr-2" /> Loading analytics...
             </div>
           )}
         </div>
@@ -1639,8 +1719,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                   <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Time</th>
                   <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Channel</th>
                   <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Direction</th>
-                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Sender / Agent</th>
-                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Content Type</th>
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Sender</th>
                   <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Content</th>
                 </tr>
               </thead>
@@ -1651,24 +1730,23 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                     <tr key={msg.id} onClick={() => setExpandedMessageId(isExpanded ? null : msg.id)}
                       className={cn('border-t border-slate-800/60 hover:bg-slate-800/30 transition-colors cursor-pointer',
                         isExpanded && 'bg-slate-800/20')}>
-                      <td className="px-3 py-2 text-slate-500 whitespace-nowrap tabular-nums align-top"
+                      <td className="px-3 py-2 text-slate-500 whitespace-nowrap tabular-nums align-top w-[100px]"
                         title={new Date(msg.timestamp).toLocaleString()}>
                         {relativeTime(msg.timestamp)}
                       </td>
-                      <td className="px-3 py-2 text-cyan-400 font-mono align-top">{msg.channel_id}</td>
-                      <td className="px-3 py-2 align-top whitespace-nowrap">
+                      <td className="px-3 py-2 text-cyan-400 font-mono align-top w-[70px]">{msg.channel_id}</td>
+                      <td className="px-3 py-2 align-top whitespace-nowrap w-[60px]">
                         <span className={cn('inline-block w-1.5 h-1.5 rounded-full mr-1.5', msg.direction === 'inbound' ? 'bg-blue-400' : 'bg-emerald-400')} />
                         <span className={msg.direction === 'inbound' ? 'text-blue-400' : 'text-emerald-400'}>
                           {msg.direction === 'inbound' ? '\u2191 IN' : '\u2193 OUT'}
                         </span>
                       </td>
-                      <td className="px-3 py-2 text-slate-400 font-mono align-top">{msg.sender_id || msg.agent_id || '\u2014'}</td>
-                      <td className="px-3 py-2 text-slate-500 font-mono align-top">{msg.content_type || '\u2014'}</td>
+                      <td className="px-3 py-2 text-slate-400 font-mono align-top w-[80px]">{msg.sender_id || msg.agent_id || '\u2014'}</td>
                       <td className="px-3 py-2 text-slate-300 align-top">
                         {isExpanded ? (
                           <pre className="whitespace-pre-wrap break-all font-mono text-xs text-slate-200 max-h-60 overflow-y-auto">{msg.content || '\u2014'}</pre>
                         ) : (
-                          <span className="truncate block max-w-[400px]" title={msg.content || ''}>{msg.content?.slice(0, 120) || '\u2014'}</span>
+                          <span className="truncate block" title={msg.content || ''}>{msg.content?.slice(0, 200) || '\u2014'}</span>
                         )}
                       </td>
                     </tr>
