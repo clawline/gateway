@@ -1214,9 +1214,13 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
               </div>
               <div>
                 <label className={labelClassName}>Default Model</label>
-                <input className={inputClassName} value={aiSettings.llmModel}
-                  onChange={e => setAiSettings(s => ({ ...s, llmModel: e.target.value }))}
-                  placeholder="gpt-5.4-mini" />
+                <select className={inputClassName} value={aiSettings.llmModel}
+                  onChange={e => setAiSettings(s => ({ ...s, llmModel: e.target.value }))}>
+                  <option value="">gpt-5.4-mini (default)</option>
+                  {['gpt-5.4', 'gpt-5.4-pro', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5-mini', 'gpt-4.1', 'gpt-4o', 'gpt-image-1', 'gpt-4o-mini-transcribe', 'gpt-4o-transcribe', 'MiniMax-M2.5', 'FW-GLM-5', 'Kimi-K2.5'].map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
                 <p className="text-[10px] text-slate-600 mt-1">Used when no per-feature model is set.</p>
               </div>
             </div>
@@ -1231,9 +1235,13 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
               </div>
               <div>
                 <label className={labelClassName}>Model</label>
-                <input className={inputClassName} value={aiSettings.suggestionModel}
-                  onChange={e => setAiSettings(s => ({ ...s, suggestionModel: e.target.value }))}
-                  placeholder={`(default: ${aiSettings.llmModel || 'gpt-5.4-mini'})`} />
+                <select className={inputClassName} value={aiSettings.suggestionModel}
+                  onChange={e => setAiSettings(s => ({ ...s, suggestionModel: e.target.value }))}>
+                  <option value="">(default: {aiSettings.llmModel || 'gpt-5.4-mini'})</option>
+                  {['gpt-5.4', 'gpt-5.4-pro', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5-mini', 'gpt-4.1', 'gpt-4o', 'gpt-image-1', 'gpt-4o-mini-transcribe', 'gpt-4o-transcribe', 'MiniMax-M2.5', 'FW-GLM-5', 'Kimi-K2.5'].map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
                 <p className="text-[10px] text-slate-600 mt-1">Override model for suggestions only. Empty = use default model above.</p>
               </div>
               <div>
@@ -1254,9 +1262,13 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
               </div>
               <div>
                 <label className={labelClassName}>Model</label>
-                <input className={inputClassName} value={aiSettings.voiceRefineModel}
-                  onChange={e => setAiSettings(s => ({ ...s, voiceRefineModel: e.target.value }))}
-                  placeholder={`(default: ${aiSettings.llmModel || 'gpt-5.4-mini'})`} />
+                <select className={inputClassName} value={aiSettings.voiceRefineModel}
+                  onChange={e => setAiSettings(s => ({ ...s, voiceRefineModel: e.target.value }))}>
+                  <option value="">(default: {aiSettings.llmModel || 'gpt-5.4-mini'})</option>
+                  {['gpt-5.4', 'gpt-5.4-pro', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5-mini', 'gpt-4.1', 'gpt-4o', 'gpt-image-1', 'gpt-4o-mini-transcribe', 'gpt-4o-transcribe', 'MiniMax-M2.5', 'FW-GLM-5', 'Kimi-K2.5'].map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
                 <p className="text-[10px] text-slate-600 mt-1">Override model for voice refinement only. Empty = use default model above.</p>
               </div>
               <div>
