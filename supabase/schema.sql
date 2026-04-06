@@ -44,3 +44,27 @@ create trigger cl_channel_users_set_updated_at
 before update on public.cl_channel_users
 for each row
 execute function public.cl_set_updated_at();
+
+-- ── Message persistence ──────────────────────────────────────────────
+
+create table if not exists public.cl_messages (
+  id uuid primary key default gen_random_uuid(),
+  channel_id text not null,
+  sender_id text,
+  agent_id text,
+  message_id text,
+  content text,
+  content_type text not null default 'text',
+  direction text not null check (direction in ('inbound', 'outbound')),
+  media_url text,
+  parent_id text,
+  meta jsonb,
+  timestamp bigint not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists cl_messages_channel_ts_idx
+  on public.cl_messages (channel_id, timestamp desc);
+
+create index if not exists cl_messages_sender_idx
+  on public.cl_messages (channel_id, sender_id, timestamp desc);

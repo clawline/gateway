@@ -194,6 +194,49 @@ let relayConfig = {
   channels: {},
 };
 
+// ── Message persistence (async, fire-and-forget) ──
+
+const MESSAGE_TYPES_TO_PERSIST = new Set([
+  'message.receive', 'message.send',
+]);
+
+function persistMessage(channelId, event, direction, senderId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey || !event) return;
+
+  const eventType = event.type || '';
+  if (!MESSAGE_TYPES_TO_PERSIST.has(eventType)) return;
+
+  const data = event.data || event;
+  const row = {
+    channel_id: channelId,
+    sender_id: senderId || data.senderId || null,
+    agent_id: data.agentId || null,
+    message_id: data.messageId || null,
+    content: data.content || data.text || null,
+    content_type: data.contentType || data.messageType || 'text',
+    direction,
+    media_url: data.mediaUrl || null,
+    parent_id: data.parentId || data.replyTo || null,
+    meta: data.meta ? JSON.stringify(data.meta) : null,
+    timestamp: data.timestamp || Date.now(),
+  };
+
+  fetch(`${supabaseUrl}/pg/rest/v1/cl_messages`, {
+    method: 'POST',
+    headers: {
+      apikey: supabaseKey,
+      authorization: `Bearer ${supabaseKey}`,
+      'content-type': 'application/json',
+      prefer: 'return=minimal',
+    },
+    body: JSON.stringify(row),
+  }).catch((err) => {
+    console.warn(`[messages] persist failed: ${err.message}`);
+  });
+}
+
 function maskSecret(value) {
   const secret = normalizeNonEmpty(value);
   if (!secret) {
@@ -602,6 +645,7 @@ backendWss.on("connection", (ws) => {
       if (!client || client.channelId !== boundChannelId) {
         return;
       }
+      persistMessage(boundChannelId, frame.event, 'outbound', client.userId);
       sendJson(client.ws, frame.event);
       return;
     }
@@ -720,6 +764,7 @@ clientWss.on("connection", (ws, request) => {
     }
 
     console.log(`[relay] → forwarding client event to backend ${channelId}: ${event?.type || 'unknown'}`);
+    persistMessage(channelId, event, 'inbound', authResult.authUser?.senderId);
     sendJson(currentBackend.ws, {
       type: "relay.client.event",
       connectionId,
