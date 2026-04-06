@@ -4,8 +4,12 @@ import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import {
   Activity,
+  BarChart3,
   Check,
+  ChevronDown,
+  ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Copy,
   Database,
   Globe,
@@ -259,6 +263,21 @@ function buildClientConnectUrl(state: RelayState | null, channel: RelayChannel, 
 function formatTimestamp(timestamp?: number) {
   if (!timestamp) return 'N/A';
   return new Date(timestamp).toLocaleString();
+}
+
+function relativeTime(ts: number | string): string {
+  const now = Date.now();
+  const then = typeof ts === 'string' ? new Date(ts).getTime() : ts;
+  const diffMs = now - then;
+  if (diffMs < 0) return 'just now';
+  const seconds = Math.floor(diffMs / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 
 function buildDiagnosticLines(state: RelayState) {
@@ -794,22 +813,32 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
 
   // ── Message Log ──
   type MessageRow = { id: string; channel_id: string; sender_id: string | null; agent_id: string | null; content: string | null; content_type: string; direction: string; timestamp: number; created_at: string };
-  const [isMessageLogOpen, setIsMessageLogOpen] = useState(false);
+  const [currentView, setCurrentView] = useState<'dashboard' | 'messages'>('dashboard');
   const [messageLogRows, setMessageLogRows] = useState<MessageRow[]>([]);
   const [messageLogTotal, setMessageLogTotal] = useState(0);
   const [messageLogChannel, setMessageLogChannel] = useState('');
   const [messageLogLoading, setMessageLogLoading] = useState(false);
+  const [messageLogPage, setMessageLogPage] = useState(0);
+  const [messageLogDirection, setMessageLogDirection] = useState<'' | 'inbound' | 'outbound'>('');
+  const [messageLogAutoRefresh, setMessageLogAutoRefresh] = useState(false);
+  const [expandedMessageId, setExpandedMessageId] = useState<string | null>(null);
+  const [messageAnalyticsOpen, setMessageAnalyticsOpen] = useState(false);
+  const MESSAGE_PAGE_SIZE = 50;
 
-  const fetchMessageLog = useCallback(async (channelFilter?: string) => {
+  const fetchMessageLog = useCallback(async (opts?: { channel?: string; direction?: string; page?: number }) => {
     setMessageLogLoading(true);
     try {
-      const params = new URLSearchParams({ limit: '50' });
-      if (channelFilter) params.set('channelId', channelFilter);
+      const ch = opts?.channel ?? messageLogChannel;
+      const dir = opts?.direction ?? messageLogDirection;
+      const pg = opts?.page ?? messageLogPage;
+      const params = new URLSearchParams({ limit: String(MESSAGE_PAGE_SIZE), offset: String(pg * MESSAGE_PAGE_SIZE) });
+      if (ch) params.set('channelId', ch);
+      if (dir) params.set('direction', `eq.${dir}`);
       const data = await apiFetch<{ ok: boolean; messages: MessageRow[]; total: number }>(`/api/messages?${params}`, activeRelay, undefined);
       if (data.ok) { setMessageLogRows(data.messages); setMessageLogTotal(data.total); }
     } catch { /* ignore */ }
     setMessageLogLoading(false);
-  }, [activeRelay]);
+  }, [activeRelay, messageLogChannel, messageLogDirection, messageLogPage]);
 
 
   const updateRelayNodes = async (next: RelayNode[]) => {
@@ -928,6 +957,18 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
       setSelectedChannelId(channels[0].channelId);
     }
   }, [relayState]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Message Log auto-refresh ──────────────────────────────
+  useEffect(() => {
+    if (!messageLogAutoRefresh || currentView !== 'messages') return;
+    const id = window.setInterval(() => { void fetchMessageLog(); }, 10_000);
+    return () => window.clearInterval(id);
+  }, [messageLogAutoRefresh, currentView, fetchMessageLog]);
+
+  // Refetch when page/direction/channel changes
+  useEffect(() => {
+    if (currentView === 'messages') { void fetchMessageLog(); }
+  }, [messageLogPage, messageLogDirection, messageLogChannel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Diagnostic ─────────────────────────────────────────────
   const runDiagnostic = async () => {
@@ -1074,8 +1115,8 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
               className="p-1.5 border border-slate-700 text-amber-400 hover:text-amber-300 hover:border-amber-600 transition-colors" title="AI Settings">
               <Sparkles className="w-3.5 h-3.5" strokeWidth={1.8} />
             </button>
-            <button type="button" onClick={() => { setIsMessageLogOpen(true); void fetchMessageLog(); }}
-              className="p-1.5 border border-slate-700 text-emerald-400 hover:text-emerald-300 hover:border-emerald-600 transition-colors" title="Message Log">
+            <button type="button" onClick={() => { if (currentView === 'messages') { setCurrentView('dashboard'); } else { setCurrentView('messages'); void fetchMessageLog(); } }}
+              className={cn('p-1.5 border transition-colors', currentView === 'messages' ? 'border-emerald-500 text-emerald-300 bg-emerald-950/40' : 'border-slate-700 text-emerald-400 hover:text-emerald-300 hover:border-emerald-600')} title="Message Log">
               <MessageSquare className="w-3.5 h-3.5" strokeWidth={1.8} />
             </button>
           </div>
@@ -1291,67 +1332,6 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
         </ModalShell>
       )}
 
-      {/* ── Message Log Modal ── */}
-      {isMessageLogOpen && (
-        <ModalShell title="MESSAGE_LOG" icon={MessageSquare} onClose={() => setIsMessageLogOpen(false)} maxWidth="max-w-3xl">
-          <div className="space-y-3">
-            {/* Filter bar */}
-            <div className="flex items-center gap-2">
-              <select value={messageLogChannel}
-                onChange={e => { setMessageLogChannel(e.target.value); void fetchMessageLog(e.target.value || undefined); }}
-                className="bg-slate-900/60 border border-slate-700 text-slate-300 text-xs px-2.5 py-1.5 font-mono focus:outline-none focus:border-emerald-500 flex-1">
-                <option value="">All Channels</option>
-                {relayState?.channels?.map(ch => (
-                  <option key={ch.channelId} value={ch.channelId}>{ch.label || ch.channelId}</option>
-                ))}
-              </select>
-              <button type="button" onClick={() => void fetchMessageLog(messageLogChannel || undefined)} disabled={messageLogLoading}
-                className="p-1.5 border border-slate-700 text-emerald-400 hover:border-emerald-600 transition-colors">
-                <RefreshCw className={cn('w-3.5 h-3.5', messageLogLoading && 'animate-spin')} />
-              </button>
-              <span className="text-[10px] text-slate-500 font-mono tabular-nums">{messageLogTotal} total</span>
-            </div>
-
-            {/* Message list */}
-            <div className="max-h-[60vh] overflow-y-auto border border-slate-800">
-              {messageLogRows.length === 0 && !messageLogLoading && (
-                <div className="py-12 text-center text-slate-600 text-xs">No messages found</div>
-              )}
-              {messageLogLoading && messageLogRows.length === 0 && (
-                <div className="py-12 text-center text-slate-600 text-xs flex items-center justify-center gap-2">
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Loading…
-                </div>
-              )}
-              <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-slate-900/95 backdrop-blur-sm">
-                  <tr className="text-slate-500 text-left">
-                    <th className="px-2 py-1.5 font-medium">Time</th>
-                    <th className="px-2 py-1.5 font-medium">Channel</th>
-                    <th className="px-2 py-1.5 font-medium">Dir</th>
-                    <th className="px-2 py-1.5 font-medium">Sender</th>
-                    <th className="px-2 py-1.5 font-medium">Content</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {messageLogRows.map(msg => (
-                    <tr key={msg.id} className="border-t border-slate-800/60 hover:bg-slate-800/30 transition-colors">
-                      <td className="px-2 py-1.5 text-slate-500 whitespace-nowrap tabular-nums">{new Date(msg.timestamp).toLocaleString()}</td>
-                      <td className="px-2 py-1.5 text-cyan-400 font-mono">{msg.channel_id}</td>
-                      <td className="px-2 py-1.5">
-                        <span className={cn('inline-block w-1.5 h-1.5 rounded-full mr-1', msg.direction === 'inbound' ? 'bg-blue-400' : 'bg-emerald-400')} />
-                        <span className={msg.direction === 'inbound' ? 'text-blue-400' : 'text-emerald-400'}>{msg.direction === 'inbound' ? '↑ IN' : '↓ OUT'}</span>
-                      </td>
-                      <td className="px-2 py-1.5 text-slate-400 font-mono">{msg.sender_id || msg.agent_id || '—'}</td>
-                      <td className="px-2 py-1.5 text-slate-300 max-w-[300px] truncate" title={msg.content || ''}>{msg.content?.slice(0, 100) || '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </ModalShell>
-      )}
-
       <DiagnosticModal isOpen={isDiagOpen} isLoading={isDiagLoading} lines={diagLines} onClose={() => setIsDiagOpen(false)} />
       <AppDialogModal state={appDialogState} isSubmitting={isAppDialogSubmitting} error={appDialogError} onClose={closeAppDialog} onConfirm={() => { void handleAppDialogConfirm(); }} />
       <NodeConfigModal channel={configChannel} backendEndpoint={backendEndpoint} onClose={() => setConfigChannelId(null)} />
@@ -1381,6 +1361,22 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
           <div className="border border-rose-900/30 bg-rose-950/20 px-4 py-3 text-xs text-rose-400">{dashboardError}</div>
         )}
 
+        {/* ── View Toggle Nav ── */}
+        <div className="flex items-center gap-1 shrink-0">
+          <button type="button" onClick={() => setCurrentView('dashboard')}
+            className={cn('px-4 py-2 text-xs font-medium tracking-widest uppercase border-b-2 transition-colors',
+              currentView === 'dashboard' ? 'border-cyan-500 text-cyan-400' : 'border-transparent text-slate-500 hover:text-slate-300')}>
+            <div className="flex items-center gap-1.5"><Server className="w-3.5 h-3.5" /> Dashboard</div>
+          </button>
+          <button type="button" onClick={() => { setCurrentView('messages'); void fetchMessageLog(); }}
+            className={cn('px-4 py-2 text-xs font-medium tracking-widest uppercase border-b-2 transition-colors',
+              currentView === 'messages' ? 'border-emerald-500 text-emerald-400' : 'border-transparent text-slate-500 hover:text-slate-300')}>
+            <div className="flex items-center gap-1.5"><MessageSquare className="w-3.5 h-3.5" /> Messages</div>
+          </button>
+          <div className="flex-1 border-b border-slate-800" />
+        </div>
+
+        {currentView === 'dashboard' && (<>
         {/* Overview */}
         <Panel title="RELAY_GATEWAY" icon={Server} className="shrink-0">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -1540,6 +1536,164 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
             </div>
           </Panel>
         </div>
+        </>)}
+
+        {currentView === 'messages' && (<>
+        {/* ── Stats Summary Bar ── */}
+        {(() => {
+          const inboundCount = messageLogRows.filter(m => m.direction === 'inbound').length;
+          const outboundCount = messageLogRows.filter(m => m.direction === 'outbound').length;
+          const uniqueChannels = new Set(messageLogRows.map(m => m.channel_id)).size;
+          return (
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 shrink-0">
+              {[
+                { label: 'TOTAL MESSAGES', value: messageLogTotal, color: 'text-cyan-400' },
+                { label: 'INBOUND', value: inboundCount, color: 'text-blue-400' },
+                { label: 'OUTBOUND', value: outboundCount, color: 'text-emerald-400' },
+                { label: 'UNIQUE CHANNELS', value: uniqueChannels, color: 'text-amber-400' },
+              ].map(stat => (
+                <div key={stat.label} className="bg-slate-900/50 border border-slate-800 px-4 py-3">
+                  <div className="text-[10px] text-slate-500 tracking-widest uppercase">{stat.label}</div>
+                  <div className={cn('font-mono text-2xl', stat.color)}>{stat.value}</div>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
+
+        {/* ── Analytics Section (collapsible, placeholder) ── */}
+        <div className="bg-slate-900/50 border border-slate-800 shrink-0">
+          <button type="button" onClick={() => setMessageAnalyticsOpen(!messageAnalyticsOpen)}
+            className="w-full flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80 hover:bg-slate-900 transition-colors">
+            <BarChart3 className="w-3.5 h-3.5 text-amber-500" strokeWidth={1.8} />
+            <span className="text-[11px] font-medium text-slate-400 tracking-widest uppercase">Analytics</span>
+            <span className="flex-1" />
+            {messageAnalyticsOpen ? <ChevronUp className="w-3.5 h-3.5 text-slate-500" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-500" />}
+          </button>
+          {messageAnalyticsOpen && (
+            <div className="p-3 grid grid-cols-1 lg:grid-cols-3 gap-3">
+              {[
+                { title: 'MESSAGES_PER_HOUR', icon: BarChart3 },
+                { title: 'TOP_CHANNELS', icon: Network },
+                { title: 'INBOUND_VS_OUTBOUND', icon: Radio },
+              ].map(card => (
+                <div key={card.title} className="bg-slate-950/60 border border-slate-800 flex flex-col overflow-hidden">
+                  <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80">
+                    <card.icon className="w-3.5 h-3.5 text-amber-500" strokeWidth={1.8} />
+                    <span className="text-[11px] font-medium text-slate-400 tracking-widest uppercase">{card.title}</span>
+                  </div>
+                  <div className="p-6 flex items-center justify-center text-slate-600 text-xs font-mono">
+                    Chart coming soon
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* ── Filter Bar ── */}
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <select value={messageLogChannel}
+            onChange={e => { setMessageLogChannel(e.target.value); setMessageLogPage(0); }}
+            className="bg-slate-900/60 border border-slate-700 text-slate-300 text-xs px-2.5 py-1.5 font-mono focus:outline-none focus:border-emerald-500">
+            <option value="">All Channels</option>
+            {relayState?.channels?.map(ch => (
+              <option key={ch.channelId} value={ch.channelId}>{ch.label || ch.channelId}</option>
+            ))}
+          </select>
+          <select value={messageLogDirection}
+            onChange={e => { setMessageLogDirection(e.target.value as '' | 'inbound' | 'outbound'); setMessageLogPage(0); }}
+            className="bg-slate-900/60 border border-slate-700 text-slate-300 text-xs px-2.5 py-1.5 font-mono focus:outline-none focus:border-emerald-500">
+            <option value="">All Directions</option>
+            <option value="inbound">Inbound</option>
+            <option value="outbound">Outbound</option>
+          </select>
+          <button type="button" onClick={() => void fetchMessageLog()} disabled={messageLogLoading}
+            className="p-1.5 border border-slate-700 text-emerald-400 hover:border-emerald-600 transition-colors">
+            <RefreshCw className={cn('w-3.5 h-3.5', messageLogLoading && 'animate-spin')} />
+          </button>
+          <label className="flex items-center gap-1.5 text-xs text-slate-500 ml-1 cursor-pointer select-none">
+            <input type="checkbox" checked={messageLogAutoRefresh} onChange={e => setMessageLogAutoRefresh(e.target.checked)}
+              className="accent-emerald-500" />
+            <span className="tracking-wider uppercase text-[10px]">Auto-refresh</span>
+            {messageLogAutoRefresh && <span className="text-emerald-500 text-[10px]">(10s)</span>}
+          </label>
+          <span className="flex-1" />
+          <span className="text-[10px] text-slate-500 font-mono tabular-nums">{messageLogTotal} total</span>
+        </div>
+
+        {/* ── Message Table ── */}
+        <div className="flex-1 min-h-0 flex flex-col">
+          <div className="flex-1 overflow-y-auto border border-slate-800 bg-slate-900/30">
+            {messageLogRows.length === 0 && !messageLogLoading && (
+              <div className="py-12 text-center text-slate-600 text-xs">No messages found</div>
+            )}
+            {messageLogLoading && messageLogRows.length === 0 && (
+              <div className="py-12 text-center text-slate-600 text-xs flex items-center justify-center gap-2">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Loading...
+              </div>
+            )}
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-slate-900/95 backdrop-blur-sm z-10">
+                <tr className="text-slate-500 text-left">
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Time</th>
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Channel</th>
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Direction</th>
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Sender / Agent</th>
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Content Type</th>
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Content</th>
+                </tr>
+              </thead>
+              <tbody>
+                {messageLogRows.map(msg => {
+                  const isExpanded = expandedMessageId === msg.id;
+                  return (
+                    <tr key={msg.id} onClick={() => setExpandedMessageId(isExpanded ? null : msg.id)}
+                      className={cn('border-t border-slate-800/60 hover:bg-slate-800/30 transition-colors cursor-pointer',
+                        isExpanded && 'bg-slate-800/20')}>
+                      <td className="px-3 py-2 text-slate-500 whitespace-nowrap tabular-nums align-top"
+                        title={new Date(msg.timestamp).toLocaleString()}>
+                        {relativeTime(msg.timestamp)}
+                      </td>
+                      <td className="px-3 py-2 text-cyan-400 font-mono align-top">{msg.channel_id}</td>
+                      <td className="px-3 py-2 align-top whitespace-nowrap">
+                        <span className={cn('inline-block w-1.5 h-1.5 rounded-full mr-1.5', msg.direction === 'inbound' ? 'bg-blue-400' : 'bg-emerald-400')} />
+                        <span className={msg.direction === 'inbound' ? 'text-blue-400' : 'text-emerald-400'}>
+                          {msg.direction === 'inbound' ? '\u2191 IN' : '\u2193 OUT'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-slate-400 font-mono align-top">{msg.sender_id || msg.agent_id || '\u2014'}</td>
+                      <td className="px-3 py-2 text-slate-500 font-mono align-top">{msg.content_type || '\u2014'}</td>
+                      <td className="px-3 py-2 text-slate-300 align-top">
+                        {isExpanded ? (
+                          <pre className="whitespace-pre-wrap break-all font-mono text-xs text-slate-200 max-h-60 overflow-y-auto">{msg.content || '\u2014'}</pre>
+                        ) : (
+                          <span className="truncate block max-w-[400px]" title={msg.content || ''}>{msg.content?.slice(0, 120) || '\u2014'}</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* ── Pagination ── */}
+          <div className="flex items-center justify-between pt-3 shrink-0">
+            <button type="button" onClick={() => setMessageLogPage(p => Math.max(0, p - 1))} disabled={messageLogPage === 0 || messageLogLoading}
+              className="px-3 py-1.5 border border-slate-700 text-slate-400 hover:text-cyan-400 hover:border-cyan-700 transition-colors text-xs flex items-center gap-1.5 disabled:opacity-30 disabled:cursor-not-allowed">
+              <ChevronLeft className="w-3 h-3" /> Previous
+            </button>
+            <span className="text-[10px] text-slate-500 font-mono tabular-nums tracking-wider">
+              PAGE {messageLogPage + 1} / {Math.max(1, Math.ceil(messageLogTotal / MESSAGE_PAGE_SIZE))}
+            </span>
+            <button type="button" onClick={() => setMessageLogPage(p => p + 1)} disabled={(messageLogPage + 1) * MESSAGE_PAGE_SIZE >= messageLogTotal || messageLogLoading}
+              className="px-3 py-1.5 border border-slate-700 text-slate-400 hover:text-cyan-400 hover:border-cyan-700 transition-colors text-xs flex items-center gap-1.5 disabled:opacity-30 disabled:cursor-not-allowed">
+              Next <ChevronRight className="w-3 h-3" />
+            </button>
+          </div>
+        </div>
+        </>)}
       </main>
     </div>
   );
