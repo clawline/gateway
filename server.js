@@ -253,6 +253,16 @@ Rules:
 
 Example output: ["怎么部署?", "有什么替代方案?", "能详细说说吗?"]`;
 
+const DEFAULT_REPLY_DRAFT_PROMPT = `You are a reply drafting assistant. The AI agent has sent a message and the user needs to respond. Based on the conversation history, draft a complete, natural reply from the user's perspective.
+
+Rules:
+- Write the reply as the user (first person), responding to the AI agent's last message
+- Be concise but complete — answer questions, provide requested info, give clear instructions
+- Match the language and tone of the conversation
+- If the agent asked a question, answer it directly
+- If the agent completed a task, acknowledge and give next steps if needed
+- Return ONLY the draft reply text, nothing else`;
+
 const DEFAULT_VOICE_REFINE_PROMPT = `You are a voice message refinement assistant. The user dictated a message via speech recognition, which may contain recognition errors, filler words, repetitions, or awkward phrasing.
 
 Your task:
@@ -342,8 +352,8 @@ async function callLlm(systemPrompt, messages, opts) {
 
   const llmMessages = [{ role: 'system', content: systemPrompt }];
 
-  // Voice-refine uses more context (last 20) to resolve ambiguity; suggestions use last 6
-  const contextLimit = opts.type === 'voice-refine' ? 20 : 6;
+  // Voice-refine uses more context (last 20); reply uses last 10; suggestions use last 6
+  const contextLimit = opts.type === 'voice-refine' ? 20 : opts.type === 'reply' ? 10 : 6;
   for (const m of messages.slice(-contextLimit)) {
     llmMessages.push({
       role: m.role === 'user' ? 'user' : 'assistant',
@@ -355,6 +365,8 @@ async function callLlm(systemPrompt, messages, opts) {
     llmMessages.push({ role: 'user', content: `Refine this voice transcript:\n\n${opts.text}` });
   } else if (opts.type === 'suggestions') {
     llmMessages.push({ role: 'user', content: 'Based on the conversation above, generate 3-5 follow-up suggestions as a JSON array. Output ONLY the JSON array like ["suggestion1", "suggestion2", "suggestion3"], no other text.' });
+  } else if (opts.type === 'reply') {
+    llmMessages.push({ role: 'user', content: 'Draft a reply to the last assistant message above. Write from the user\'s perspective. Return ONLY the reply text.' });
   }
 
   // Azure OpenAI endpoint
@@ -1384,14 +1396,22 @@ server.on("request", async (request, response) => {
       const body = JSON.parse(await parseRawBody(request, 128 * 1024));
       const messages = Array.isArray(body.messages) ? body.messages : [];
       const userPrompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+      const mode = body.mode === 'reply' ? 'reply' : 'suggestions';
 
       const settings = await loadAiSettings();
-      const systemPrompt = buildFinalPrompt(
-        settings.suggestionPrompt || DEFAULT_SUGGESTION_PROMPT,
-        userPrompt,
-      );
-      const suggestions = await callLlm(systemPrompt, messages, { type: 'suggestions' });
-      writeJson(response, 200, { ok: true, suggestions });
+
+      if (mode === 'reply') {
+        const systemPrompt = buildFinalPrompt(DEFAULT_REPLY_DRAFT_PROMPT, userPrompt);
+        const reply = await callLlm(systemPrompt, messages, { type: 'reply' });
+        writeJson(response, 200, { ok: true, mode: 'reply', reply });
+      } else {
+        const systemPrompt = buildFinalPrompt(
+          settings.suggestionPrompt || DEFAULT_SUGGESTION_PROMPT,
+          userPrompt,
+        );
+        const suggestions = await callLlm(systemPrompt, messages, { type: 'suggestions' });
+        writeJson(response, 200, { ok: true, mode: 'suggestions', suggestions });
+      }
     } catch (err) {
       writeJson(response, 500, { ok: false, error: String(err.message || err) });
     }
