@@ -823,6 +823,15 @@ backendWss.on("connection", (ws) => {
       }
       persistMessage(boundChannelId, frame.event, 'outbound', client.userId);
       sendJson(client.ws, frame.event);
+
+      // Broadcast to sibling connections (same channelId + chatId, different connectionId)
+      if (client.chatId) {
+        for (const [siblingId, sibling] of clientConnections) {
+          if (siblingId !== frame.connectionId && sibling.channelId === boundChannelId && sibling.chatId === client.chatId && sibling.ws.readyState === WebSocket.OPEN) {
+            sendJson(sibling.ws, frame.event);
+          }
+        }
+      }
       return;
     }
 
@@ -909,6 +918,7 @@ clientWss.on("connection", (ws, request) => {
   clientConnections.set(connectionId, {
     ws,
     channelId,
+    chatId: query.chatId || '',
     userId: authResult.authUser?.senderId,
   });
 
@@ -941,6 +951,16 @@ clientWss.on("connection", (ws, request) => {
 
     console.log(`[relay] → forwarding client event to backend ${channelId}: ${event?.type || 'unknown'}`);
     persistMessage(channelId, event, 'inbound', authResult.authUser?.senderId);
+
+    // Broadcast inbound message to sibling connections (so client B sees what client A sent)
+    if (query.chatId && (event?.type === 'message.receive')) {
+      for (const [siblingId, sibling] of clientConnections) {
+        if (siblingId !== connectionId && sibling.channelId === channelId && sibling.chatId === query.chatId && sibling.ws.readyState === WebSocket.OPEN) {
+          sendJson(sibling.ws, { type: 'message.send', data: { ...event.data, echo: true } });
+        }
+      }
+    }
+
     sendJson(currentBackend.ws, {
       type: "relay.client.event",
       connectionId,
@@ -1314,6 +1334,42 @@ server.on("request", async (request, response) => {
         .sort((a, b) => (b.inbound + b.outbound) - (a.inbound + a.outbound));
 
       writeJson(response, 200, { ok: true, hourly, models, channels });
+    } catch (err) {
+      writeJson(response, 500, { ok: false, error: String(err.message || err) });
+    }
+    return;
+  }
+
+  // ── GET /api/messages/sync — pull missed messages since timestamp (for offline clients) ──
+
+  if (pathname === "/api/messages/sync" && request.method === "GET") {
+    if (!(await requireAuthAny(request, response, url))) return;
+    const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+    const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+    if (!supabaseUrl || !supabaseKey) {
+      writeJson(response, 200, { ok: true, messages: [] });
+      return;
+    }
+    try {
+      const channelId = url.searchParams.get('channelId') || '';
+      const chatId = url.searchParams.get('chatId') || '';
+      const after = Number(url.searchParams.get('after')) || 0;
+      const limit = Math.min(Number(url.searchParams.get('limit')) || 100, 500);
+
+      if (!channelId) {
+        writeJson(response, 400, { ok: false, error: 'channelId required' });
+        return;
+      }
+
+      let filter = `select=id,channel_id,sender_id,agent_id,message_id,content,content_type,direction,media_url,meta,timestamp&order=timestamp.asc&limit=${limit}`;
+      filter += `&channel_id=eq.${encodeURIComponent(channelId)}`;
+      if (after > 0) filter += `&timestamp=gt.${after}`;
+
+      const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_messages?${filter}`, {
+        headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` },
+      });
+      const rows = await res.json();
+      writeJson(response, 200, { ok: true, messages: rows });
     } catch (err) {
       writeJson(response, 500, { ok: false, error: String(err.message || err) });
     }
