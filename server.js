@@ -311,7 +311,9 @@ async function callLlm(systemPrompt, messages, opts) {
 
   // DB overrides > env vars > hardcoded defaults
   const endpoint = settings.llmEndpoint || DEFAULT_LLM_ENDPOINT;
-  const model = settings.llmModel || DEFAULT_LLM_MODEL;
+  // Per-feature model override: suggestionModel / voiceRefineModel > llmModel > default
+  const model = (opts.type === 'suggestions' ? settings.suggestionModel : opts.type === 'voice-refine' ? settings.voiceRefineModel : null)
+    || settings.llmModel || DEFAULT_LLM_MODEL;
   const apiKey = settings.llmApiKey || process.env.AZURE_OPENAI_API_KEY || '';
   if (!apiKey) throw new Error('LLM API key not configured. Set AZURE_OPENAI_API_KEY env var or configure in Admin > AI Settings.');
 
@@ -1171,6 +1173,8 @@ server.on("request", async (request, response) => {
         llmEndpoint: settings.llmEndpoint || DEFAULT_LLM_ENDPOINT,
         llmApiKey: settings.llmApiKey ? '***configured***' : '',
         llmModel: settings.llmModel || DEFAULT_LLM_MODEL,
+        suggestionModel: settings.suggestionModel || '',
+        voiceRefineModel: settings.voiceRefineModel || '',
         suggestionPrompt: settings.suggestionPrompt || '',
         voiceRefinePrompt: settings.voiceRefinePrompt || '',
       });
@@ -1188,6 +1192,40 @@ server.on("request", async (request, response) => {
       writeJson(response, 200, { ok: true });
     } catch (err) {
       writeJson(response, 400, { ok: false, error: String(err.message || err) });
+    }
+    return;
+  }
+
+  // ── GET /api/messages — message log viewer ──
+
+  if (pathname === "/api/messages" && request.method === "GET") {
+    if (!(await requireAdmin(request, response, url))) return;
+    const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+    const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+    if (!supabaseUrl || !supabaseKey) {
+      writeJson(response, 200, { ok: true, messages: [], total: 0 });
+      return;
+    }
+    try {
+      const channelId = url.searchParams.get('channelId') || '';
+      const limit = Math.min(Number(url.searchParams.get('limit')) || 50, 200);
+      const offset = Number(url.searchParams.get('offset')) || 0;
+
+      let filter = `select=id,channel_id,sender_id,agent_id,message_id,content,content_type,direction,media_url,timestamp,created_at&order=timestamp.desc&limit=${limit}&offset=${offset}`;
+      if (channelId) filter += `&channel_id=eq.${encodeURIComponent(channelId)}`;
+
+      const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_messages?${filter}`, {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+          prefer: 'count=exact',
+        },
+      });
+      const rows = await res.json();
+      const total = Number(res.headers.get('content-range')?.split('/')?.[1] || rows.length);
+      writeJson(response, 200, { ok: true, messages: rows, total });
+    } catch (err) {
+      writeJson(response, 500, { ok: false, error: String(err.message || err) });
     }
     return;
   }

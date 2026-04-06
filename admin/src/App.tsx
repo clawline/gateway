@@ -13,6 +13,8 @@ import {
   CircleAlert,
   Lock,
   LogOut,
+  MessageSquare,
+  Mic,
   Network,
   Pencil,
   Plus,
@@ -764,13 +766,14 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
 
   // ── AI Settings ──
   const [isAiSettingsOpen, setIsAiSettingsOpen] = useState(false);
-  const [aiSettings, setAiSettings] = useState({ llmEndpoint: '', llmApiKey: '', llmModel: '', suggestionPrompt: '', voiceRefinePrompt: '' });
+  const [aiSettings, setAiSettings] = useState({ llmEndpoint: '', llmApiKey: '', llmModel: '', suggestionModel: '', voiceRefineModel: '', suggestionPrompt: '', voiceRefinePrompt: '' });
   const [aiSettingsSaving, setAiSettingsSaving] = useState(false);
+  const [aiSettingsTab, setAiSettingsTab] = useState<'provider' | 'suggestions' | 'voice'>('provider');
 
   const fetchAiSettings = useCallback(async () => {
     try {
-      const data = await apiFetch<{ ok: boolean; llmEndpoint?: string; llmApiKey?: string; llmModel?: string; suggestionPrompt?: string; voiceRefinePrompt?: string }>('/api/ai-settings', activeRelay, undefined);
-      if (data.ok) setAiSettings({ llmEndpoint: data.llmEndpoint || '', llmApiKey: data.llmApiKey || '', llmModel: data.llmModel || '', suggestionPrompt: data.suggestionPrompt || '', voiceRefinePrompt: data.voiceRefinePrompt || '' });
+      const data = await apiFetch<{ ok: boolean; llmEndpoint?: string; llmApiKey?: string; llmModel?: string; suggestionModel?: string; voiceRefineModel?: string; suggestionPrompt?: string; voiceRefinePrompt?: string }>('/api/ai-settings', activeRelay, undefined);
+      if (data.ok) setAiSettings({ llmEndpoint: data.llmEndpoint || '', llmApiKey: data.llmApiKey || '', llmModel: data.llmModel || '', suggestionModel: data.suggestionModel || '', voiceRefineModel: data.voiceRefineModel || '', suggestionPrompt: data.suggestionPrompt || '', voiceRefinePrompt: data.voiceRefinePrompt || '' });
     } catch { /* ignore */ }
   }, [activeRelay]);
 
@@ -779,6 +782,25 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
     try { await apiFetch('/api/ai-settings', activeRelay, { method: 'PUT', body: JSON.stringify(aiSettings) }); } catch { /* ignore */ }
     setAiSettingsSaving(false);
   }, [activeRelay, aiSettings]);
+
+  // ── Message Log ──
+  type MessageRow = { id: string; channel_id: string; sender_id: string | null; agent_id: string | null; content: string | null; content_type: string; direction: string; timestamp: number; created_at: string };
+  const [isMessageLogOpen, setIsMessageLogOpen] = useState(false);
+  const [messageLogRows, setMessageLogRows] = useState<MessageRow[]>([]);
+  const [messageLogTotal, setMessageLogTotal] = useState(0);
+  const [messageLogChannel, setMessageLogChannel] = useState('');
+  const [messageLogLoading, setMessageLogLoading] = useState(false);
+
+  const fetchMessageLog = useCallback(async (channelFilter?: string) => {
+    setMessageLogLoading(true);
+    try {
+      const params = new URLSearchParams({ limit: '50' });
+      if (channelFilter) params.set('channelId', channelFilter);
+      const data = await apiFetch<{ ok: boolean; messages: MessageRow[]; total: number }>(`/api/messages?${params}`, activeRelay, undefined);
+      if (data.ok) { setMessageLogRows(data.messages); setMessageLogTotal(data.total); }
+    } catch { /* ignore */ }
+    setMessageLogLoading(false);
+  }, [activeRelay]);
 
   const activeRelay = relayNodes.find((n) => n.id === selectedRelayId) ?? relayNodes[0] ?? DEFAULT_RELAY;
   const gatewayRelay: RelayNode = DEFAULT_RELAY;
@@ -1045,6 +1067,10 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
               className="p-1.5 border border-slate-700 text-amber-400 hover:text-amber-300 hover:border-amber-600 transition-colors" title="AI Settings">
               <Sparkles className="w-3.5 h-3.5" strokeWidth={1.8} />
             </button>
+            <button type="button" onClick={() => { setIsMessageLogOpen(true); void fetchMessageLog(); }}
+              className="p-1.5 border border-slate-700 text-emerald-400 hover:text-emerald-300 hover:border-emerald-600 transition-colors" title="Message Log">
+              <MessageSquare className="w-3.5 h-3.5" strokeWidth={1.8} />
+            </button>
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -1148,51 +1174,160 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
         </ModalShell>
       )}
 
-      {/* ── AI Settings Modal ── */}
+      {/* ── AI Settings Modal (redesigned with tabs) ── */}
       {isAiSettingsOpen && (
-        <ModalShell title="AI_SETTINGS" icon={Sparkles} onClose={() => setIsAiSettingsOpen(false)}>
-          <div className="space-y-5">
-            <div>
-              <h3 className="text-xs font-medium text-amber-400 tracking-widest uppercase mb-3">LLM Provider (override defaults)</h3>
-              <div className="space-y-3">
-                <div>
-                  <label className={labelClassName}>Endpoint</label>
-                  <input className={inputClassName} value={aiSettings.llmEndpoint}
-                    onChange={e => setAiSettings(s => ({ ...s, llmEndpoint: e.target.value }))}
-                    placeholder="(default: resley Azure OpenAI)" />
-                </div>
-                <div>
-                  <label className={labelClassName}>API Key (leave empty to use env var)</label>
-                  <input className={inputClassName} type="password" value={aiSettings.llmApiKey}
-                    onChange={e => setAiSettings(s => ({ ...s, llmApiKey: e.target.value }))}
-                    placeholder="(default: AZURE_OPENAI_API_KEY env)" />
-                </div>
-                <div>
-                  <label className={labelClassName}>Model</label>
-                  <input className={inputClassName} value={aiSettings.llmModel}
-                    onChange={e => setAiSettings(s => ({ ...s, llmModel: e.target.value }))}
-                    placeholder="(default: gpt-5.4-mini)" />
-                </div>
+        <ModalShell title="AI_SETTINGS" icon={Sparkles} onClose={() => setIsAiSettingsOpen(false)} maxWidth="max-w-xl">
+          {/* Tab bar */}
+          <div className="flex border-b border-slate-800 -mx-5 px-5 mb-5">
+            {([['provider', 'Provider', Globe], ['suggestions', 'Suggestions', Sparkles], ['voice', 'Voice', Mic]] as const).map(([key, label, TabIcon]) => (
+              <button key={key} type="button" onClick={() => setAiSettingsTab(key)}
+                className={cn('flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium tracking-wide transition-colors border-b-2 -mb-px',
+                  aiSettingsTab === key ? 'border-amber-500 text-amber-400' : 'border-transparent text-slate-500 hover:text-slate-300')}>
+                <TabIcon className="w-3.5 h-3.5" />
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {/* Provider tab */}
+          {aiSettingsTab === 'provider' && (
+            <div className="space-y-4">
+              <p className="text-[11px] text-slate-500 leading-relaxed">Override the default Azure OpenAI config. Leave empty to use hardcoded defaults (gpt-5.4-mini).</p>
+              <div>
+                <label className={labelClassName}>Endpoint</label>
+                <input className={inputClassName} value={aiSettings.llmEndpoint}
+                  onChange={e => setAiSettings(s => ({ ...s, llmEndpoint: e.target.value }))}
+                  placeholder="https://resley-east-us-2-resource.openai.azure.com/openai/v1" />
+              </div>
+              <div>
+                <label className={labelClassName}>API Key</label>
+                <input className={inputClassName} type="password" value={aiSettings.llmApiKey}
+                  onChange={e => setAiSettings(s => ({ ...s, llmApiKey: e.target.value }))}
+                  placeholder="Leave empty → AZURE_OPENAI_API_KEY env" />
+              </div>
+              <div>
+                <label className={labelClassName}>Default Model</label>
+                <input className={inputClassName} value={aiSettings.llmModel}
+                  onChange={e => setAiSettings(s => ({ ...s, llmModel: e.target.value }))}
+                  placeholder="gpt-5.4-mini" />
+                <p className="text-[10px] text-slate-600 mt-1">Used when no per-feature model is set.</p>
               </div>
             </div>
-            <div className="border-t border-slate-800 pt-4">
-              <h3 className="text-xs font-medium text-amber-400 tracking-widest uppercase mb-3">Suggestion System Prompt</h3>
-              <textarea className={inputClassName + ' min-h-[100px] resize-y'} value={aiSettings.suggestionPrompt}
-                onChange={e => setAiSettings(s => ({ ...s, suggestionPrompt: e.target.value }))}
-                placeholder="Global system prompt for AI suggestions (leave empty for default)" />
+          )}
+
+          {/* Suggestions tab */}
+          {aiSettingsTab === 'suggestions' && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 mb-1">
+                <Sparkles className="w-4 h-4 text-amber-400" />
+                <span className="text-xs font-medium text-amber-400 tracking-widest uppercase">Smart Suggestions</span>
+              </div>
+              <div>
+                <label className={labelClassName}>Model</label>
+                <input className={inputClassName} value={aiSettings.suggestionModel}
+                  onChange={e => setAiSettings(s => ({ ...s, suggestionModel: e.target.value }))}
+                  placeholder={`(default: ${aiSettings.llmModel || 'gpt-5.4-mini'})`} />
+                <p className="text-[10px] text-slate-600 mt-1">Override model for suggestions only. Empty = use default model above.</p>
+              </div>
+              <div>
+                <label className={labelClassName}>System Prompt</label>
+                <textarea className={inputClassName + ' min-h-[120px] resize-y'} value={aiSettings.suggestionPrompt}
+                  onChange={e => setAiSettings(s => ({ ...s, suggestionPrompt: e.target.value }))}
+                  placeholder="Leave empty for built-in prompt. User custom prompts are appended to this." />
+              </div>
             </div>
-            <div className="border-t border-slate-800 pt-4">
-              <h3 className="text-xs font-medium text-amber-400 tracking-widest uppercase mb-3">Voice Refine System Prompt</h3>
-              <textarea className={inputClassName + ' min-h-[100px] resize-y'} value={aiSettings.voiceRefinePrompt}
-                onChange={e => setAiSettings(s => ({ ...s, voiceRefinePrompt: e.target.value }))}
-                placeholder="Global system prompt for voice text refinement (leave empty for default)" />
+          )}
+
+          {/* Voice tab */}
+          {aiSettingsTab === 'voice' && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 mb-1">
+                <Mic className="w-4 h-4 text-amber-400" />
+                <span className="text-xs font-medium text-amber-400 tracking-widest uppercase">Voice Refinement</span>
+              </div>
+              <div>
+                <label className={labelClassName}>Model</label>
+                <input className={inputClassName} value={aiSettings.voiceRefineModel}
+                  onChange={e => setAiSettings(s => ({ ...s, voiceRefineModel: e.target.value }))}
+                  placeholder={`(default: ${aiSettings.llmModel || 'gpt-5.4-mini'})`} />
+                <p className="text-[10px] text-slate-600 mt-1">Override model for voice refinement only. Empty = use default model above.</p>
+              </div>
+              <div>
+                <label className={labelClassName}>System Prompt</label>
+                <textarea className={inputClassName + ' min-h-[120px] resize-y'} value={aiSettings.voiceRefinePrompt}
+                  onChange={e => setAiSettings(s => ({ ...s, voiceRefinePrompt: e.target.value }))}
+                  placeholder="Leave empty for built-in prompt. User custom prompts are appended to this." />
+              </div>
             </div>
-            <div className="border-t border-slate-800 pt-4">
-              <button type="button" onClick={() => void saveAiSettingsHandler()} disabled={aiSettingsSaving}
-                className="w-full py-2.5 border border-amber-700 text-amber-400 hover:bg-amber-950/50 transition-colors flex items-center justify-center gap-2 text-xs disabled:opacity-50">
-                {aiSettingsSaving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
-                SAVE_SETTINGS
+          )}
+
+          {/* Save button */}
+          <div className="mt-5 pt-4 border-t border-slate-800">
+            <button type="button" onClick={() => void saveAiSettingsHandler()} disabled={aiSettingsSaving}
+              className="w-full py-2.5 border border-amber-700/60 text-amber-400 hover:bg-amber-950/40 transition-colors flex items-center justify-center gap-2 text-xs disabled:opacity-50">
+              {aiSettingsSaving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+              SAVE_SETTINGS
+            </button>
+          </div>
+        </ModalShell>
+      )}
+
+      {/* ── Message Log Modal ── */}
+      {isMessageLogOpen && (
+        <ModalShell title="MESSAGE_LOG" icon={MessageSquare} onClose={() => setIsMessageLogOpen(false)} maxWidth="max-w-3xl">
+          <div className="space-y-3">
+            {/* Filter bar */}
+            <div className="flex items-center gap-2">
+              <select value={messageLogChannel}
+                onChange={e => { setMessageLogChannel(e.target.value); void fetchMessageLog(e.target.value || undefined); }}
+                className="bg-slate-900/60 border border-slate-700 text-slate-300 text-xs px-2.5 py-1.5 font-mono focus:outline-none focus:border-emerald-500 flex-1">
+                <option value="">All Channels</option>
+                {relayState?.channels?.map(ch => (
+                  <option key={ch.channelId} value={ch.channelId}>{ch.label || ch.channelId}</option>
+                ))}
+              </select>
+              <button type="button" onClick={() => void fetchMessageLog(messageLogChannel || undefined)} disabled={messageLogLoading}
+                className="p-1.5 border border-slate-700 text-emerald-400 hover:border-emerald-600 transition-colors">
+                <RefreshCw className={cn('w-3.5 h-3.5', messageLogLoading && 'animate-spin')} />
               </button>
+              <span className="text-[10px] text-slate-500 font-mono tabular-nums">{messageLogTotal} total</span>
+            </div>
+
+            {/* Message list */}
+            <div className="max-h-[60vh] overflow-y-auto border border-slate-800">
+              {messageLogRows.length === 0 && !messageLogLoading && (
+                <div className="py-12 text-center text-slate-600 text-xs">No messages found</div>
+              )}
+              {messageLogLoading && messageLogRows.length === 0 && (
+                <div className="py-12 text-center text-slate-600 text-xs flex items-center justify-center gap-2">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Loading…
+                </div>
+              )}
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-slate-900/95 backdrop-blur-sm">
+                  <tr className="text-slate-500 text-left">
+                    <th className="px-2 py-1.5 font-medium">Time</th>
+                    <th className="px-2 py-1.5 font-medium">Channel</th>
+                    <th className="px-2 py-1.5 font-medium">Dir</th>
+                    <th className="px-2 py-1.5 font-medium">Sender</th>
+                    <th className="px-2 py-1.5 font-medium">Content</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {messageLogRows.map(msg => (
+                    <tr key={msg.id} className="border-t border-slate-800/60 hover:bg-slate-800/30 transition-colors">
+                      <td className="px-2 py-1.5 text-slate-500 whitespace-nowrap tabular-nums">{new Date(msg.timestamp).toLocaleString()}</td>
+                      <td className="px-2 py-1.5 text-cyan-400 font-mono">{msg.channel_id}</td>
+                      <td className="px-2 py-1.5">
+                        <span className={cn('inline-block w-1.5 h-1.5 rounded-full mr-1', msg.direction === 'inbound' ? 'bg-blue-400' : 'bg-emerald-400')} />
+                        <span className={msg.direction === 'inbound' ? 'text-blue-400' : 'text-emerald-400'}>{msg.direction === 'inbound' ? '↑ IN' : '↓ OUT'}</span>
+                      </td>
+                      <td className="px-2 py-1.5 text-slate-400 font-mono">{msg.sender_id || msg.agent_id || '—'}</td>
+                      <td className="px-2 py-1.5 text-slate-300 max-w-[300px] truncate" title={msg.content || ''}>{msg.content?.slice(0, 100) || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
         </ModalShell>
