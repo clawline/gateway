@@ -239,9 +239,32 @@ function persistMessage(channelId, event, direction, senderId) {
 
 // ── AI Settings & LLM helpers ──
 
-const DEFAULT_SUGGESTION_PROMPT = `You are a helpful assistant that generates follow-up questions and suggestions based on the conversation. Return a JSON array of 5-8 short suggestions (under 25 characters each). Match the language of the conversation. Return ONLY a valid JSON array, no other text.`;
+const DEFAULT_SUGGESTION_PROMPT = `You are a suggestion generator for a chat interface. Based on the conversation context, generate 3-5 follow-up questions or actions from the USER's perspective (first person).
 
-const DEFAULT_VOICE_REFINE_PROMPT = `You are a text refinement assistant. The user dictated a message via voice recognition which may contain errors, filler words, or awkward phrasing. Clean up the text while preserving the original meaning and intent. Fix grammar, remove filler words, and improve clarity. Match the original language. Return ONLY the refined text, nothing else.`;
+Rules:
+- Write every suggestion as if the user is asking/saying it (first person, e.g. "How do I...", "Can you help me...")
+- Predict what the user might want to ask or do next, NOT how the assistant should respond
+- Generate exactly 3-5 suggestions, no more, no less
+- Each suggestion must be under 25 characters
+- Make suggestions relevant, diverse, and actionable
+- If the conversation is in Chinese, generate Chinese suggestions; if in English, generate English
+- Match the language and tone of the conversation
+- Output ONLY a valid JSON array of strings, nothing else
+
+Example output: ["怎么部署?", "有什么替代方案?", "能详细说说吗?"]`;
+
+const DEFAULT_VOICE_REFINE_PROMPT = `You are a voice message refinement assistant. The user dictated a message via speech recognition, which may contain recognition errors, filler words, repetitions, or awkward phrasing.
+
+Your task:
+- Fix speech recognition errors and typos (e.g. homophones, misheard words)
+- Remove filler words (嗯、那个、就是、um、uh、like、you know, etc.)
+- Remove unnecessary repetitions
+- Fix grammar and punctuation
+- Improve clarity and readability while preserving the original meaning and intent exactly
+- Keep the same language as the input — do NOT translate
+- Keep the same tone and register (formal/informal) as the original
+- Use the recent conversation history (provided as context) to better understand ambiguous words or references
+- Return ONLY the refined text, no explanations, no quotes, no prefixes`;
 
 // Hardcoded defaults — overridable via cl_settings table
 const DEFAULT_LLM_ENDPOINT = 'https://resley-east-us-2-resource.openai.azure.com/openai/v1';
@@ -319,7 +342,9 @@ async function callLlm(systemPrompt, messages, opts) {
 
   const llmMessages = [{ role: 'system', content: systemPrompt }];
 
-  for (const m of messages.slice(-6)) {
+  // Voice-refine uses more context (last 20) to resolve ambiguity; suggestions use last 6
+  const contextLimit = opts.type === 'voice-refine' ? 20 : 6;
+  for (const m of messages.slice(-contextLimit)) {
     llmMessages.push({
       role: m.role === 'user' ? 'user' : 'assistant',
       content: typeof m.text === 'string' ? m.text.slice(0, 300) : String(m.content || m.text || '').slice(0, 300),
@@ -329,7 +354,7 @@ async function callLlm(systemPrompt, messages, opts) {
   if (opts.type === 'voice-refine') {
     llmMessages.push({ role: 'user', content: `Refine this voice transcript:\n\n${opts.text}` });
   } else if (opts.type === 'suggestions') {
-    llmMessages.push({ role: 'user', content: 'Generate follow-up suggestions based on the conversation above.' });
+    llmMessages.push({ role: 'user', content: 'Based on the conversation above, generate 3-5 follow-up suggestions as a JSON array. Output ONLY the JSON array like ["suggestion1", "suggestion2", "suggestion3"], no other text.' });
   }
 
   // Azure OpenAI endpoint
@@ -354,8 +379,10 @@ async function callLlm(systemPrompt, messages, opts) {
     // Parse JSON array from response
     try {
       const match = content.match(/\[[\s\S]*\]/);
+      if (!match) console.warn('[ai] suggestions: no JSON array in response:', content.slice(0, 200));
       return match ? JSON.parse(match[0]).filter(s => typeof s === 'string') : [];
-    } catch {
+    } catch (e) {
+      console.warn('[ai] suggestions: JSON parse failed:', e.message, content.slice(0, 200));
       return [];
     }
   }
