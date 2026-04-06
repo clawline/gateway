@@ -813,6 +813,9 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
   const [selectedRelayId, setSelectedRelayId] = useState<string>(relayNodes[0]?.id ?? 'default');
   const [isRelaySettingsOpen, setIsRelaySettingsOpen] = useState(false);
   const [editingRelay, setEditingRelay] = useState<RelayNode | null>(null);
+  const [corsOrigins, setCorsOrigins] = useState<string[]>([]);
+  const [corsInput, setCorsInput] = useState('');
+  const [corsSaving, setCorsSaving] = useState(false);
 
   const activeRelay = relayNodes.find((n) => n.id === selectedRelayId) ?? relayNodes[0] ?? DEFAULT_RELAY;
   const gatewayRelay: RelayNode = DEFAULT_RELAY;
@@ -828,6 +831,23 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
       const data = await apiFetch<{ ok: boolean; llmEndpoint?: string; llmApiKey?: string; llmModel?: string; suggestionModel?: string; voiceRefineModel?: string; suggestionPrompt?: string; voiceRefinePrompt?: string }>('/api/ai-settings', activeRelay, undefined);
       if (data.ok) setAiSettings({ llmEndpoint: data.llmEndpoint || '', llmApiKey: data.llmApiKey || '', llmModel: data.llmModel || '', suggestionModel: data.suggestionModel || '', voiceRefineModel: data.voiceRefineModel || '', suggestionPrompt: data.suggestionPrompt || '', voiceRefinePrompt: data.voiceRefinePrompt || '' });
     } catch { /* ignore */ }
+  }, [activeRelay]);
+
+  const fetchCorsOrigins = useCallback(async () => {
+    try {
+      const data = await apiFetch<{ ok: boolean; settings?: { corsAllowedOrigins?: string[] }; _env?: { CORS_ALLOWED_ORIGINS?: string[] } }>('/api/settings', activeRelay, undefined);
+      const origins = data.settings?.corsAllowedOrigins ?? data._env?.CORS_ALLOWED_ORIGINS ?? [];
+      setCorsOrigins(origins);
+    } catch { /* ignore */ }
+  }, [activeRelay]);
+
+  const saveCorsOrigins = useCallback(async (origins: string[]) => {
+    setCorsSaving(true);
+    try {
+      await apiFetch('/api/settings', activeRelay, { method: 'PUT', body: JSON.stringify({ corsAllowedOrigins: origins }) });
+      setCorsOrigins(origins);
+    } catch { /* ignore */ }
+    setCorsSaving(false);
   }, [activeRelay]);
 
   const saveAiSettingsHandler = useCallback(async () => {
@@ -1142,7 +1162,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
               className="bg-transparent border border-slate-700 text-fuchsia-300 font-mono text-xs px-1.5 py-1 focus:outline-none focus:border-fuchsia-500 cursor-pointer min-w-0">
               {relayNodes.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
             </select>
-            <button type="button" onClick={() => setIsRelaySettingsOpen(true)}
+            <button type="button" onClick={() => { setIsRelaySettingsOpen(true); void fetchCorsOrigins(); }}
               className="p-1.5 border border-slate-700 text-fuchsia-400 hover:text-fuchsia-300 hover:border-fuchsia-600 transition-colors" title="Settings">
               <Settings className="w-3.5 h-3.5" strokeWidth={1.8} />
             </button>
@@ -1246,6 +1266,31 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                 className="w-full py-3 border border-dashed border-slate-700 text-slate-500 text-xs hover:text-fuchsia-400 hover:border-fuchsia-700 transition-all flex items-center justify-center gap-2">
                 <Plus className="w-4 h-4" /> ADD_RELAY_NODE
               </button>
+              <div className="pt-4 border-t border-slate-800 mt-4">
+                <h3 className="text-[11px] font-medium text-slate-400 tracking-widest uppercase mb-3">CORS Allowed Origins</h3>
+                <div className="space-y-1.5 mb-3">
+                  {corsOrigins.length === 0 && <p className="text-[11px] text-slate-600">No origins configured (same-origin only)</p>}
+                  {corsOrigins.map((origin, i) => (
+                    <div key={i} className="flex items-center gap-2 px-3 py-1.5 bg-slate-900/60 border border-slate-800">
+                      <span className="flex-1 text-xs text-slate-300 font-mono truncate">{origin}</span>
+                      <button type="button" onClick={() => { const next = corsOrigins.filter((_, j) => j !== i); void saveCorsOrigins(next); }}
+                        className="text-slate-600 hover:text-rose-400 transition-colors p-0.5">
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <form onSubmit={(e) => { e.preventDefault(); const v = corsInput.trim(); if (v && !corsOrigins.includes(v)) { void saveCorsOrigins([...corsOrigins, v]); setCorsInput(''); } }}
+                  className="flex gap-2">
+                  <input value={corsInput} onChange={e => setCorsInput(e.target.value)}
+                    placeholder="http://localhost:4026"
+                    className={inputClassName + ' flex-1'} />
+                  <button type="submit" disabled={corsSaving || !corsInput.trim()}
+                    className="px-3 border border-slate-700 text-cyan-400 hover:bg-cyan-950/50 text-xs disabled:opacity-30 transition-colors shrink-0">
+                    {corsSaving ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                  </button>
+                </form>
+              </div>
               <div className="pt-4 border-t border-slate-800 mt-4">
                 <button type="button" onClick={() => { void runDiagnostic(); setIsRelaySettingsOpen(false); }}
                   className="w-full py-2.5 border border-slate-700 text-cyan-400 hover:bg-cyan-950/50 transition-colors flex items-center justify-center gap-2 text-xs">
