@@ -1,6 +1,5 @@
 {
-  "name": "@restry/clawline-relay-gateway",
-  "private": true,
+  "name": "@clawlines/relay-gateway",
   "type": "module",
   "version": "0.1.0",
   "description": "Relay gateway for clawdbot clawline",
