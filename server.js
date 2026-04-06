@@ -337,7 +337,7 @@ async function callLlm(systemPrompt, messages, opts) {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'api-key': apiKey },
-    body: JSON.stringify({ model, messages: llmMessages, temperature: 0.7, max_tokens: 512 }),
+    body: JSON.stringify({ model, messages: llmMessages, temperature: 0.7, max_completion_tokens: 512 }),
   });
 
   if (!res.ok) {
