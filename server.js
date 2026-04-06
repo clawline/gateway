@@ -369,9 +369,17 @@ async function callLlm(systemPrompt, messages, opts) {
     llmMessages.push({ role: 'user', content: 'Draft a reply to the last assistant message above. Write from the user\'s perspective. Return ONLY the reply text.' });
   }
 
-  // Azure OpenAI endpoint
-  const base = endpoint.replace(/\/+$/, '').replace(/\/openai\/v1$/, '');
-  const url = `${base}/openai/deployments/${model}/chat/completions?api-version=2025-01-01-preview`;
+  // Azure OpenAI endpoint: detect /openai/v1 (new Foundry-style) vs legacy deployment path
+  const endpointClean = endpoint.replace(/\/+$/, '');
+  let url;
+  if (endpointClean.includes('/openai/v1')) {
+    // New Azure AI Foundry / openai/v1 style — append /chat/completions directly
+    url = `${endpointClean}/chat/completions`;
+  } else {
+    // Legacy Azure deployment style
+    const base = endpointClean.replace(/\/openai\/?$/, '');
+    url = `${base}/openai/deployments/${model}/chat/completions?api-version=2025-01-01-preview`;
+  }
 
   const res = await fetch(url, {
     method: 'POST',
