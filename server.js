@@ -95,7 +95,7 @@ function getCorsAllowedOrigins() {
 function isOriginAllowed(origin) {
   if (!origin) return true; // same-origin requests have no Origin header
   const allowed = getCorsAllowedOrigins();
-  if (!allowed) return false; // no allowlist = same-origin only
+  if (!allowed) return true; // no allowlist configured = allow all (auth protects endpoints)
   return allowed.includes(origin);
 }
 
