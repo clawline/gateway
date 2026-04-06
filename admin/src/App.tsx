@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { useLogto, type IdTokenClaims } from '@logto/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -22,7 +22,6 @@ import {
   Server,
   Settings,
   ShieldAlert,
-  Sparkles,
   Trash2,
   Users,
   X,
@@ -762,40 +761,6 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
   const [isRelaySettingsOpen, setIsRelaySettingsOpen] = useState(false);
   const [editingRelay, setEditingRelay] = useState<RelayNode | null>(null);
 
-  // ── AI Settings ────────────────────────────────────────────
-  const [isAiSettingsOpen, setIsAiSettingsOpen] = useState(false);
-  const [aiSettings, setAiSettings] = useState<{
-    llmEndpoint: string; llmApiKey: string; llmModel: string;
-    suggestionPrompt: string; voiceRefinePrompt: string;
-  }>({ llmEndpoint: '', llmApiKey: '', llmModel: 'gpt-4.1', suggestionPrompt: '', voiceRefinePrompt: '' });
-  const [aiSettingsSaving, setAiSettingsSaving] = useState(false);
-
-  const loadAiSettings = useCallback(async () => {
-    try {
-      const data = await apiFetch<{ ok: boolean; llmEndpoint?: string; llmApiKey?: string; llmModel?: string; suggestionPrompt?: string; voiceRefinePrompt?: string }>('/api/ai-settings', activeRelay, undefined);
-      if (data.ok) {
-        setAiSettings({
-          llmEndpoint: data.llmEndpoint || '',
-          llmApiKey: data.llmApiKey || '',
-          llmModel: data.llmModel || 'gpt-4.1',
-          suggestionPrompt: data.suggestionPrompt || '',
-          voiceRefinePrompt: data.voiceRefinePrompt || '',
-        });
-      }
-    } catch { /* ignore */ }
-  }, [activeRelay]);
-
-  const saveAiSettings2 = useCallback(async () => {
-    setAiSettingsSaving(true);
-    try {
-      await apiFetch('/api/ai-settings', activeRelay, {
-        method: 'PUT',
-        body: JSON.stringify(aiSettings),
-      });
-    } catch { /* ignore */ }
-    setAiSettingsSaving(false);
-  }, [activeRelay, aiSettings]);
-
   const activeRelay = relayNodes.find((n) => n.id === selectedRelayId) ?? relayNodes[0] ?? DEFAULT_RELAY;
   const gatewayRelay: RelayNode = DEFAULT_RELAY;
 
@@ -1057,10 +1022,6 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
               className="p-1.5 border border-slate-700 text-fuchsia-400 hover:text-fuchsia-300 hover:border-fuchsia-600 transition-colors" title="Settings">
               <Settings className="w-3.5 h-3.5" strokeWidth={1.8} />
             </button>
-            <button type="button" onClick={() => { setIsAiSettingsOpen(true); void loadAiSettings(); }}
-              className="p-1.5 border border-slate-700 text-amber-400 hover:text-amber-300 hover:border-amber-600 transition-colors" title="AI Settings">
-              <Sparkles className="w-3.5 h-3.5" strokeWidth={1.8} />
-            </button>
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -1161,56 +1122,6 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
               </div>
             </div>
           )}
-        </ModalShell>
-      )}
-
-      {/* ── AI Settings Modal ── */}
-      {isAiSettingsOpen && (
-        <ModalShell title="AI_SETTINGS" icon={Sparkles} onClose={() => setIsAiSettingsOpen(false)}>
-          <div className="space-y-5">
-            <div>
-              <h3 className="text-xs font-medium text-amber-400 tracking-widest uppercase mb-3">LLM Provider</h3>
-              <div className="space-y-3">
-                <div>
-                  <label className={labelClassName}>Endpoint</label>
-                  <input className={inputClassName} value={aiSettings.llmEndpoint}
-                    onChange={e => setAiSettings(s => ({ ...s, llmEndpoint: e.target.value }))}
-                    placeholder="https://models.inference.ai.azure.com" />
-                </div>
-                <div>
-                  <label className={labelClassName}>API Key</label>
-                  <input className={inputClassName} type="password" value={aiSettings.llmApiKey}
-                    onChange={e => setAiSettings(s => ({ ...s, llmApiKey: e.target.value }))}
-                    placeholder="sk-..." />
-                </div>
-                <div>
-                  <label className={labelClassName}>Model</label>
-                  <input className={inputClassName} value={aiSettings.llmModel}
-                    onChange={e => setAiSettings(s => ({ ...s, llmModel: e.target.value }))}
-                    placeholder="gpt-4.1" />
-                </div>
-              </div>
-            </div>
-            <div className="border-t border-slate-800 pt-4">
-              <h3 className="text-xs font-medium text-amber-400 tracking-widest uppercase mb-3">Suggestion System Prompt</h3>
-              <textarea className={inputClassName + ' min-h-[100px] resize-y'} value={aiSettings.suggestionPrompt}
-                onChange={e => setAiSettings(s => ({ ...s, suggestionPrompt: e.target.value }))}
-                placeholder="Global system prompt for AI suggestions (leave empty for default)" />
-            </div>
-            <div className="border-t border-slate-800 pt-4">
-              <h3 className="text-xs font-medium text-amber-400 tracking-widest uppercase mb-3">Voice Refine System Prompt</h3>
-              <textarea className={inputClassName + ' min-h-[100px] resize-y'} value={aiSettings.voiceRefinePrompt}
-                onChange={e => setAiSettings(s => ({ ...s, voiceRefinePrompt: e.target.value }))}
-                placeholder="Global system prompt for voice text refinement (leave empty for default)" />
-            </div>
-            <div className="border-t border-slate-800 pt-4">
-              <button type="button" onClick={() => void saveAiSettings2()} disabled={aiSettingsSaving}
-                className="w-full py-2.5 border border-amber-700 text-amber-400 hover:bg-amber-950/50 transition-colors flex items-center justify-center gap-2 text-xs disabled:opacity-50">
-                {aiSettingsSaving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
-                SAVE_SETTINGS
-              </button>
-            </div>
-          </div>
         </ModalShell>
       )}
 

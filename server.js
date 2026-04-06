@@ -243,69 +243,17 @@ const DEFAULT_SUGGESTION_PROMPT = `You are a helpful assistant that generates fo
 
 const DEFAULT_VOICE_REFINE_PROMPT = `You are a text refinement assistant. The user dictated a message via voice recognition which may contain errors, filler words, or awkward phrasing. Clean up the text while preserving the original meaning and intent. Fix grammar, remove filler words, and improve clarity. Match the original language. Return ONLY the refined text, nothing else.`;
 
-let aiSettingsCache = null;
-let aiSettingsCacheTime = 0;
-const AI_SETTINGS_CACHE_TTL = 30_000; // 30s
-
-async function loadAiSettings() {
-  if (aiSettingsCache && Date.now() - aiSettingsCacheTime < AI_SETTINGS_CACHE_TTL) {
-    return aiSettingsCache;
-  }
-  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
-  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !supabaseKey) {
-    return { llmEndpoint: '', llmApiKey: '', llmModel: 'gpt-4.1', suggestionPrompt: '', voiceRefinePrompt: '' };
-  }
-  try {
-    const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_settings?key=eq.ai&select=value`, {
-      headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` },
-    });
-    if (res.ok) {
-      const rows = await res.json();
-      if (rows.length > 0 && rows[0].value) {
-        aiSettingsCache = rows[0].value;
-        aiSettingsCacheTime = Date.now();
-        return aiSettingsCache;
-      }
-    }
-  } catch { /* fall through */ }
-  return { llmEndpoint: '', llmApiKey: '', llmModel: 'gpt-4.1', suggestionPrompt: '', voiceRefinePrompt: '' };
-}
-
-async function saveAiSettings(updates) {
-  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
-  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !supabaseKey) throw new Error('Supabase not configured');
-
-  const current = await loadAiSettings();
-  const merged = { ...current, ...updates };
-
-  await fetch(`${supabaseUrl}/pg/rest/v1/cl_settings`, {
-    method: 'POST',
-    headers: {
-      apikey: supabaseKey,
-      authorization: `Bearer ${supabaseKey}`,
-      'content-type': 'application/json',
-      prefer: 'resolution=merge-duplicates',
-    },
-    body: JSON.stringify({ key: 'ai', value: merged }),
-  });
-
-  aiSettingsCache = merged;
-  aiSettingsCacheTime = Date.now();
-}
+const LLM_ENDPOINT = 'https://resley-east-us-2-resource.openai.azure.com/openai/v1';
+const LLM_MODEL = 'gpt-5.4-mini';
 
 function buildFinalPrompt(globalPrompt, userPrompt) {
   const parts = [globalPrompt, userPrompt].filter(Boolean);
   return parts.join('\n\n');
 }
 
-async function callLlm(settings, systemPrompt, messages, opts) {
-  const endpoint = settings.llmEndpoint || process.env.LLM_ENDPOINT || 'https://models.inference.ai.azure.com';
-  const apiKey = settings.llmApiKey || process.env.LLM_API_KEY || '';
-  const model = settings.llmModel || process.env.LLM_MODEL || 'gpt-4.1';
-
-  if (!apiKey) throw new Error('LLM API key not configured. Set it in Admin > AI Settings.');
+async function callLlm(systemPrompt, messages, opts) {
+  const apiKey = process.env.AZURE_OPENAI_API_KEY || '';
+  if (!apiKey) throw new Error('AZURE_OPENAI_API_KEY environment variable not set.');
 
   const llmMessages = [{ role: 'system', content: systemPrompt }];
 
@@ -324,25 +272,14 @@ async function callLlm(settings, systemPrompt, messages, opts) {
     llmMessages.push({ role: 'user', content: 'Generate follow-up suggestions based on the conversation above.' });
   }
 
-  // Detect Azure OpenAI vs standard OpenAI-compatible
-  let url;
-  if (endpoint.includes('.openai.azure.com')) {
-    url = `${endpoint}/openai/deployments/${model}/chat/completions?api-version=2025-01-01-preview`;
-  } else {
-    url = `${endpoint.replace(/\/+$/, '')}/chat/completions`;
-  }
-
-  const headers = { 'content-type': 'application/json' };
-  if (endpoint.includes('.openai.azure.com')) {
-    headers['api-key'] = apiKey;
-  } else {
-    headers['authorization'] = `Bearer ${apiKey}`;
-  }
+  // Azure OpenAI endpoint
+  const base = LLM_ENDPOINT.replace(/\/+$/, '').replace(/\/openai\/v1$/, '');
+  const url = `${base}/openai/deployments/${LLM_MODEL}/chat/completions?api-version=2025-01-01-preview`;
 
   const res = await fetch(url, {
     method: 'POST',
-    headers,
-    body: JSON.stringify({ model, messages: llmMessages, temperature: 0.7, max_tokens: 512 }),
+    headers: { 'content-type': 'application/json', 'api-key': apiKey },
+    body: JSON.stringify({ model: LLM_MODEL, messages: llmMessages, temperature: 0.7, max_tokens: 512 }),
   });
 
   if (!res.ok) {
@@ -1165,31 +1102,6 @@ server.on("request", async (request, response) => {
     return;
   }
 
-  // ── AI Settings API (admin — global prompts & LLM config) ──
-
-  if (pathname === "/api/ai-settings" && request.method === "GET") {
-    if (!(await requireAdmin(request, response, url))) return;
-    try {
-      const settings = await loadAiSettings();
-      writeJson(response, 200, { ok: true, ...settings });
-    } catch (err) {
-      writeJson(response, 500, { ok: false, error: String(err.message || err) });
-    }
-    return;
-  }
-
-  if (pathname === "/api/ai-settings" && request.method === "PUT") {
-    if (!(await requireAdmin(request, response, url))) return;
-    try {
-      const body = JSON.parse(await parseRawBody(request, 64 * 1024));
-      await saveAiSettings(body);
-      writeJson(response, 200, { ok: true });
-    } catch (err) {
-      writeJson(response, 400, { ok: false, error: String(err.message || err) });
-    }
-    return;
-  }
-
   // ── POST /api/suggestions — AI-powered follow-up suggestions ──
 
   if (pathname === "/api/suggestions" && request.method === "POST") {
@@ -1199,13 +1111,8 @@ server.on("request", async (request, response) => {
       const messages = Array.isArray(body.messages) ? body.messages : [];
       const userPrompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
 
-      const settings = await loadAiSettings();
-      const systemPrompt = buildFinalPrompt(
-        settings.suggestionPrompt || DEFAULT_SUGGESTION_PROMPT,
-        userPrompt,
-      );
-
-      const suggestions = await callLlm(settings, systemPrompt, messages, { type: 'suggestions' });
+      const systemPrompt = buildFinalPrompt(DEFAULT_SUGGESTION_PROMPT, userPrompt);
+      const suggestions = await callLlm(systemPrompt, messages, { type: 'suggestions' });
       writeJson(response, 200, { ok: true, suggestions });
     } catch (err) {
       writeJson(response, 500, { ok: false, error: String(err.message || err) });
@@ -1228,13 +1135,8 @@ server.on("request", async (request, response) => {
         return;
       }
 
-      const settings = await loadAiSettings();
-      const systemPrompt = buildFinalPrompt(
-        settings.voiceRefinePrompt || DEFAULT_VOICE_REFINE_PROMPT,
-        userPrompt,
-      );
-
-      const refined = await callLlm(settings, systemPrompt, messages, { type: 'voice-refine', text });
+      const systemPrompt = buildFinalPrompt(DEFAULT_VOICE_REFINE_PROMPT, userPrompt);
+      const refined = await callLlm(systemPrompt, messages, { type: 'voice-refine', text });
       writeJson(response, 200, { ok: true, refined });
     } catch (err) {
       writeJson(response, 500, { ok: false, error: String(err.message || err) });
