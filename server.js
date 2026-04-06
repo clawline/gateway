@@ -412,7 +412,7 @@ const CORS_HEADERS = {
 };
 
 const SECURITY_HEADERS = {
-  "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' wss:",
+  "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' wss: https://logto.dr.restry.cn https://*.openai.azure.com https://api.qrserver.com",
   "strict-transport-security": "max-age=31536000; includeSubDomains",
 };
 

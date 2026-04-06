@@ -128,9 +128,12 @@ type RelayNode = {
 };
 
 const RELAY_REGISTRY_KEY = 'relay-registry';
-const DEFAULT_RELAY: RelayNode = { id: 'default', name: 'relay.restry.cn', url: 'https://relay.restry.cn', adminToken: '5ff160a5089321692679f5a8442686b8' };
+const isLocal = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+const DEFAULT_RELAY: RelayNode = { id: 'default', name: isLocal ? 'localhost' : 'relay.restry.cn', url: isLocal ? window.location.origin : 'https://relay.restry.cn', adminToken: isLocal ? 'local-test-token' : '5ff160a5089321692679f5a8442686b8' };
 
 function loadRelayRegistryLocal(): RelayNode[] {
+  // On localhost, always use the local gateway as default
+  if (isLocal) return [DEFAULT_RELAY];
   try {
     const raw = localStorage.getItem(RELAY_REGISTRY_KEY);
     if (!raw) return [DEFAULT_RELAY];
@@ -702,6 +705,9 @@ export default function App() {
   const { isAuthenticated: isLogtoAuth, isLoading: isLogtoLoading, signIn, signOut, getIdTokenClaims } = useLogto();
   const [logtoUser, setLogtoUser] = useState<IdTokenClaims | null>(null);
 
+  // Dev bypass: skip Logto auth on localhost
+  const isDevBypass = isLocal && !isLogtoAuth && !isLogtoLoading;
+
   useEffect(() => {
     if (isLogtoAuth) {
       void getIdTokenClaims().then((claims) => { if (claims) setLogtoUser(claims); });
@@ -721,7 +727,7 @@ export default function App() {
     );
   }
 
-  if (!isLogtoAuth) {
+  if (!isLogtoAuth && !isDevBypass) {
     return (
       <div className="min-h-screen bg-[#020617] text-slate-300 flex items-center justify-center relative overflow-hidden">
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_40%,oklch(0.18_0.04_220),oklch(0.06_0.02_250))] opacity-70" />
@@ -764,6 +770,9 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
   const [isRelaySettingsOpen, setIsRelaySettingsOpen] = useState(false);
   const [editingRelay, setEditingRelay] = useState<RelayNode | null>(null);
 
+  const activeRelay = relayNodes.find((n) => n.id === selectedRelayId) ?? relayNodes[0] ?? DEFAULT_RELAY;
+  const gatewayRelay: RelayNode = DEFAULT_RELAY;
+
   // ── AI Settings ──
   const [isAiSettingsOpen, setIsAiSettingsOpen] = useState(false);
   const [aiSettings, setAiSettings] = useState({ llmEndpoint: '', llmApiKey: '', llmModel: '', suggestionModel: '', voiceRefineModel: '', suggestionPrompt: '', voiceRefinePrompt: '' });
@@ -802,17 +811,15 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
     setMessageLogLoading(false);
   }, [activeRelay]);
 
-  const activeRelay = relayNodes.find((n) => n.id === selectedRelayId) ?? relayNodes[0] ?? DEFAULT_RELAY;
-  const gatewayRelay: RelayNode = DEFAULT_RELAY;
-
 
   const updateRelayNodes = async (next: RelayNode[]) => {
     setRelayNodes(next);
     saveRelayRegistryLocal(next);
   };
 
-  // Load relay nodes from server on mount
+  // Load relay nodes from server on mount (skip on localhost — use local gateway)
   useEffect(() => {
+    if (isLocal) return;
     (async () => {
       const serverNodes = await fetchRelayNodesFromServer(gatewayRelay);
       if (serverNodes) {

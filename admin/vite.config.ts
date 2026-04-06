@@ -24,22 +24,22 @@ export default defineConfig(() => {
       'gw.dev.dora.restry.cn','gateway.clawlines.net', 'relay.restry.cn', 'dev.dora.restry.cn'],
       proxy: {
         '/api': {
-          target: 'http://127.0.0.1:18831',
+          target: 'http://127.0.0.1:19080',
           changeOrigin: true,
         },
         '/ws': {
-          target: 'ws://127.0.0.1:18831',
+          target: 'ws://127.0.0.1:19080',
           ws: true,
           changeOrigin: true,
           rewrite: (incomingPath) => incomingPath.replace(/^\/ws/, ''),
         },
         '/backend': {
-          target: 'ws://127.0.0.1:18831',
+          target: 'ws://127.0.0.1:19080',
           ws: true,
           changeOrigin: true,
         },
         '/client': {
-          target: 'ws://127.0.0.1:18831',
+          target: 'ws://127.0.0.1:19080',
           ws: true,
           changeOrigin: true,
         },
