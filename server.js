@@ -1255,6 +1255,8 @@ server.on("request", async (request, response) => {
     if (!(await requireAdmin(request, response, url))) return;
     try {
       const body = JSON.parse(await parseRawBody(request, 64 * 1024));
+      // Don't overwrite llmApiKey if the client sent back the masked placeholder
+      if (body.llmApiKey === '***configured***') delete body.llmApiKey;
       await saveAiSettings(body);
       writeJson(response, 200, { ok: true });
     } catch (err) {

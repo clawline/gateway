@@ -829,7 +829,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
   const fetchAiSettings = useCallback(async () => {
     try {
       const data = await apiFetch<{ ok: boolean; llmEndpoint?: string; llmApiKey?: string; llmModel?: string; suggestionModel?: string; voiceRefineModel?: string; suggestionPrompt?: string; voiceRefinePrompt?: string }>('/api/ai-settings', activeRelay, undefined);
-      if (data.ok) setAiSettings({ llmEndpoint: data.llmEndpoint || '', llmApiKey: data.llmApiKey || '', llmModel: data.llmModel || '', suggestionModel: data.suggestionModel || '', voiceRefineModel: data.voiceRefineModel || '', suggestionPrompt: data.suggestionPrompt || '', voiceRefinePrompt: data.voiceRefinePrompt || '' });
+      if (data.ok) setAiSettings({ llmEndpoint: data.llmEndpoint || '', llmApiKey: '', llmModel: data.llmModel || '', suggestionModel: data.suggestionModel || '', voiceRefineModel: data.voiceRefineModel || '', suggestionPrompt: data.suggestionPrompt || '', voiceRefinePrompt: data.voiceRefinePrompt || '' });
     } catch { /* ignore */ }
   }, [activeRelay]);
 
@@ -1331,7 +1331,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                 <label className={labelClassName}>API Key</label>
                 <input className={inputClassName} type="password" value={aiSettings.llmApiKey}
                   onChange={e => setAiSettings(s => ({ ...s, llmApiKey: e.target.value }))}
-                  placeholder="Leave empty → AZURE_OPENAI_API_KEY env" />
+                  placeholder="Already configured — enter new key to change" />
               </div>
               <div>
                 <label className={labelClassName}>Default Model</label>
