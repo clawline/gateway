@@ -250,7 +250,9 @@ function buildPluginConfig(channel: RelayChannel, backendEndpoint: string) {
 function buildClientConnectUrl(state: RelayState | null, channel: RelayChannel, user: RelayUser) {
   const base = normalizeBaseUrl(state?.publicBaseUrl) || window.location.origin;
   const wsBase = httpToWs(base);
-  const serverUrl = `${wsBase}/client?channelId=${encodeURIComponent(channel.channelId)}&token=${encodeURIComponent(user.token)}${user.chatId ? `&chatId=${encodeURIComponent(user.chatId)}` : ''}`;
+  // chatId defaults to senderId for DM routing — OpenClaw uses senderId as the message target
+  const effectiveChatId = user.chatId || user.senderId;
+  const serverUrl = `${wsBase}/client?channelId=${encodeURIComponent(channel.channelId)}&token=${encodeURIComponent(user.token)}${effectiveChatId ? `&chatId=${encodeURIComponent(effectiveChatId)}` : ''}`;
   const params = new URLSearchParams();
   params.set('serverUrl', serverUrl);
   if (user.senderId) params.set('senderId', user.senderId);
