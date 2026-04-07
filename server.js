@@ -969,6 +969,12 @@ clientWss.on("connection", (ws, request) => {
       return;
     }
 
+    // Respond to client heartbeat pings directly (don't forward to backend)
+    if (event?.type === 'ping') {
+      sendJson(ws, { type: 'pong', data: { timestamp: Date.now() } });
+      return;
+    }
+
     console.log(`[relay] → forwarding client event to backend ${channelId}: ${event?.type || 'unknown'}`);
     persistMessage(channelId, event, 'inbound', authResult.authUser?.senderId);
 
