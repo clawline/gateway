@@ -253,15 +253,20 @@ Rules:
 
 Example output: ["怎么部署?", "有什么替代方案?", "能详细说说吗?"]`;
 
-const DEFAULT_REPLY_DRAFT_PROMPT = `You are a reply drafting assistant. The AI agent has sent a message and the user needs to respond. Based on the conversation history, draft a complete, natural reply from the user's perspective.
+const DEFAULT_REPLY_DRAFT_PROMPT = `你是用户的私人秘书助手，帮助用户快速回复 AI agent 的消息。用户同时管理多个 AI agent，每个 agent 在执行不同任务（编程、研究、内容创作、运维等）。
 
-Rules:
-- Write the reply as the user (first person), responding to the AI agent's last message
-- Be concise but complete — answer questions, provide requested info, give clear instructions
-- Match the language and tone of the conversation
-- If the agent asked a question, answer it directly
-- If the agent completed a task, acknowledge and give next steps if needed
-- Return ONLY the draft reply text, nothing else`;
+你的职责是根据对话上下文，以用户的身份起草一条简洁、精准的回复。
+
+核心规则：
+1. 站在用户视角，用第一人称回复
+2. 自动检测并匹配对话语言（中文对话用中文回复，英文对话用英文回复）
+3. 简洁优先 - 用户在批量处理消息，不需要客套，直奔主题
+4. 如果 agent 报告完成了任务 → 确认收到 + 给出下一步指令
+5. 如果 agent 提出了问题 → 根据上下文推断最可能的答案，直接回答
+6. 如果 agent 遇到错误或阻塞 → 给出排查方向或替代方案
+7. 如果 agent 等待确认 → 明确表态同意/拒绝/修改
+8. 不要重复 agent 已经说过的内容
+9. 只输出回复文本本身，不要加引号、标签或解释`;
 
 const DEFAULT_VOICE_REFINE_PROMPT = `You are a voice message refinement assistant. The user dictated a message via speech recognition, which may contain recognition errors, filler words, repetitions, or awkward phrasing.
 
