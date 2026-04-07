@@ -824,14 +824,14 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
 
   // ── AI Settings ──
   const [isAiSettingsOpen, setIsAiSettingsOpen] = useState(false);
-  const [aiSettings, setAiSettings] = useState({ llmEndpoint: '', llmApiKey: '', llmModel: '', suggestionModel: '', voiceRefineModel: '', suggestionPrompt: '', voiceRefinePrompt: '' });
+  const [aiSettings, setAiSettings] = useState({ llmEndpoint: '', llmApiKey: '', llmModel: '', suggestionModel: '', replyModel: '', voiceRefineModel: '', suggestionPrompt: '', replyPrompt: '', voiceRefinePrompt: '' });
   const [aiSettingsSaving, setAiSettingsSaving] = useState(false);
-  const [aiSettingsTab, setAiSettingsTab] = useState<'provider' | 'suggestions' | 'voice'>('provider');
+  const [aiSettingsTab, setAiSettingsTab] = useState<'provider' | 'suggestions' | 'reply' | 'voice'>('provider');
 
   const fetchAiSettings = useCallback(async () => {
     try {
-      const data = await apiFetch<{ ok: boolean; llmEndpoint?: string; llmApiKey?: string; llmModel?: string; suggestionModel?: string; voiceRefineModel?: string; suggestionPrompt?: string; voiceRefinePrompt?: string }>('/api/ai-settings', activeRelay, undefined);
-      if (data.ok) setAiSettings({ llmEndpoint: data.llmEndpoint || '', llmApiKey: '', llmModel: data.llmModel || '', suggestionModel: data.suggestionModel || '', voiceRefineModel: data.voiceRefineModel || '', suggestionPrompt: data.suggestionPrompt || '', voiceRefinePrompt: data.voiceRefinePrompt || '' });
+      const data = await apiFetch<{ ok: boolean; llmEndpoint?: string; llmApiKey?: string; llmModel?: string; suggestionModel?: string; replyModel?: string; voiceRefineModel?: string; suggestionPrompt?: string; replyPrompt?: string; voiceRefinePrompt?: string }>('/api/ai-settings', activeRelay, undefined);
+      if (data.ok) setAiSettings({ llmEndpoint: data.llmEndpoint || '', llmApiKey: '', llmModel: data.llmModel || '', suggestionModel: data.suggestionModel || '', replyModel: data.replyModel || '', voiceRefineModel: data.voiceRefineModel || '', suggestionPrompt: data.suggestionPrompt || '', replyPrompt: data.replyPrompt || '', voiceRefinePrompt: data.voiceRefinePrompt || '' });
     } catch { /* ignore */ }
   }, [activeRelay]);
 
@@ -1309,7 +1309,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
         <ModalShell title="AI_SETTINGS" icon={Sparkles} onClose={() => setIsAiSettingsOpen(false)} maxWidth="max-w-xl">
           {/* Tab bar */}
           <div className="flex border-b border-slate-800 -mx-5 px-5 mb-5">
-            {([['provider', 'Provider', Globe], ['suggestions', 'Suggestions', Sparkles], ['voice', 'Voice', Mic]] as const).map(([key, label, TabIcon]) => (
+            {([['provider', 'Provider', Globe], ['suggestions', 'Suggestions', Sparkles], ['reply', 'Reply Draft', MessageSquare], ['voice', 'Voice', Mic]] as const).map(([key, label, TabIcon]) => (
               <button key={key} type="button" onClick={() => setAiSettingsTab(key)}
                 className={cn('flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium tracking-wide transition-colors border-b-2 -mb-px',
                   aiSettingsTab === key ? 'border-amber-500 text-amber-400' : 'border-transparent text-slate-500 hover:text-slate-300')}>
@@ -1372,6 +1372,34 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                 <textarea className={inputClassName + ' min-h-[120px] resize-y'} value={aiSettings.suggestionPrompt}
                   onChange={e => setAiSettings(s => ({ ...s, suggestionPrompt: e.target.value }))}
                   placeholder="Leave empty for built-in prompt. User custom prompts are appended to this." />
+              </div>
+            </div>
+          )}
+
+          {/* Reply Draft tab */}
+          {aiSettingsTab === 'reply' && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 mb-1">
+                <MessageSquare className="w-4 h-4 text-amber-400" />
+                <span className="text-xs font-medium text-amber-400 tracking-widest uppercase">Reply Draft (Suggest Reply)</span>
+              </div>
+              <div>
+                <label className={labelClassName}>Model</label>
+                <select className={inputClassName} value={aiSettings.replyModel}
+                  onChange={e => setAiSettings(s => ({ ...s, replyModel: e.target.value }))}>
+                  <option value="">(default: {aiSettings.llmModel || 'gpt-5.4-mini'})</option>
+                  {['gpt-5.4', 'gpt-5.4-pro', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5-mini', 'gpt-4.1', 'gpt-4o', 'gpt-4o-mini-transcribe', 'gpt-4o-transcribe', 'MiniMax-M2.5', 'FW-GLM-5', 'Kimi-K2.5'].map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-slate-600 mt-1">Override model for Inbox "Suggest Reply" drafting. Empty = use default model above.</p>
+              </div>
+              <div>
+                <label className={labelClassName}>System Prompt</label>
+                <textarea className={inputClassName + ' min-h-[120px] resize-y'} value={aiSettings.replyPrompt || ''}
+                  onChange={e => setAiSettings(s => ({ ...s, replyPrompt: e.target.value }))}
+                  placeholder="Leave empty for built-in prompt. Controls how AI drafts replies from user's perspective. Client custom prompts are appended to this." />
+                <p className="text-[10px] text-slate-600 mt-1">Default: "You are a reply drafting assistant..." — override to change tone, language, or behavior.</p>
               </div>
             </div>
           )}

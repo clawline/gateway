@@ -344,8 +344,8 @@ async function callLlm(systemPrompt, messages, opts) {
 
   // DB overrides > env vars > hardcoded defaults
   const endpoint = settings.llmEndpoint || DEFAULT_LLM_ENDPOINT;
-  // Per-feature model override: suggestionModel / voiceRefineModel > llmModel > default
-  const model = (opts.type === 'suggestions' ? settings.suggestionModel : opts.type === 'voice-refine' ? settings.voiceRefineModel : null)
+  // Per-feature model override: suggestionModel / replyModel / voiceRefineModel > llmModel > default
+  const model = (opts.type === 'suggestions' ? settings.suggestionModel : opts.type === 'reply' ? settings.replyModel : opts.type === 'voice-refine' ? settings.voiceRefineModel : null)
     || settings.llmModel || DEFAULT_LLM_MODEL;
   const apiKey = settings.llmApiKey || process.env.AZURE_OPENAI_API_KEY || '';
   if (!apiKey) throw new Error('LLM API key not configured. Set AZURE_OPENAI_API_KEY env var or configure in Admin > AI Settings.');
@@ -1247,6 +1247,8 @@ server.on("request", async (request, response) => {
         llmApiKey: settings.llmApiKey ? '***configured***' : '',
         llmModel: settings.llmModel || DEFAULT_LLM_MODEL,
         suggestionModel: settings.suggestionModel || '',
+        replyModel: settings.replyModel || '',
+        replyPrompt: settings.replyPrompt || '',
         voiceRefineModel: settings.voiceRefineModel || '',
         suggestionPrompt: settings.suggestionPrompt || '',
         voiceRefinePrompt: settings.voiceRefinePrompt || '',
@@ -1417,7 +1419,7 @@ server.on("request", async (request, response) => {
       const settings = await loadAiSettings();
 
       if (mode === 'reply') {
-        const systemPrompt = buildFinalPrompt(DEFAULT_REPLY_DRAFT_PROMPT, userPrompt);
+        const systemPrompt = buildFinalPrompt(settings.replyPrompt || DEFAULT_REPLY_DRAFT_PROMPT, userPrompt);
         const reply = await callLlm(systemPrompt, messages, { type: 'reply' });
         writeJson(response, 200, { ok: true, mode: 'reply', reply });
       } else {
