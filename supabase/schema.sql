@@ -69,6 +69,11 @@ create index if not exists cl_messages_channel_ts_idx
 create index if not exists cl_messages_sender_idx
   on public.cl_messages (channel_id, sender_id, timestamp desc);
 
+-- Deduplication: same message_id + direction should not be stored twice
+CREATE UNIQUE INDEX IF NOT EXISTS cl_messages_msgid_dir_uniq
+  ON public.cl_messages (message_id, direction)
+  WHERE message_id IS NOT NULL;
+
 -- ── Settings (key-value store for LLM config overrides, global prompts) ──
 
 create table if not exists public.cl_settings (

@@ -194,11 +194,15 @@ let relayConfig = {
   channels: {},
 };
 
-// ── Message persistence (async, fire-and-forget) ──
+// ── Message persistence (with in-memory retry queue) ──
 
 const MESSAGE_TYPES_TO_PERSIST = new Set([
   'message.receive', 'message.send',
 ]);
+
+const PERSIST_RETRY_MAX = 3;
+const PERSIST_RETRY_INTERVAL_MS = 10_000;
+const persistRetryQueue = [];
 
 function persistMessage(channelId, event, direction, senderId) {
   const supabaseUrl = process.env.RELAY_SUPABASE_URL;
@@ -223,6 +227,10 @@ function persistMessage(channelId, event, direction, senderId) {
     timestamp: data.timestamp || Date.now(),
   };
 
+  persistToSupabase(row, supabaseUrl, supabaseKey, 0);
+}
+
+function persistToSupabase(row, supabaseUrl, supabaseKey, attempt) {
   fetch(`${supabaseUrl}/pg/rest/v1/cl_messages`, {
     method: 'POST',
     headers: {
@@ -232,10 +240,30 @@ function persistMessage(channelId, event, direction, senderId) {
       prefer: 'return=minimal,resolution=ignore-duplicates',
     },
     body: JSON.stringify(row),
-  }).catch((err) => {
-    console.warn(`[messages] persist failed: ${err.message}`);
+  }).then((res) => {
+    if (!res.ok && res.status >= 500) {
+      enqueuePersistRetry(row, supabaseUrl, supabaseKey, attempt);
+    }
+  }).catch(() => {
+    enqueuePersistRetry(row, supabaseUrl, supabaseKey, attempt);
   });
 }
+
+function enqueuePersistRetry(row, supabaseUrl, supabaseKey, attempt) {
+  if (attempt >= PERSIST_RETRY_MAX) {
+    console.error(`[messages] persist failed after ${PERSIST_RETRY_MAX} retries: ${row.message_id}`);
+    return;
+  }
+  persistRetryQueue.push({ row, supabaseUrl, supabaseKey, attempt: attempt + 1 });
+}
+
+setInterval(() => {
+  if (persistRetryQueue.length === 0) return;
+  const batch = persistRetryQueue.splice(0, persistRetryQueue.length);
+  for (const item of batch) {
+    persistToSupabase(item.row, item.supabaseUrl, item.supabaseKey, item.attempt);
+  }
+}, PERSIST_RETRY_INTERVAL_MS);
 
 // ── AI Settings & LLM helpers ──
 
@@ -1404,7 +1432,8 @@ server.on("request", async (request, response) => {
         headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` },
       });
       const rows = await res.json();
-      writeJson(response, 200, { ok: true, messages: rows });
+      const hasMore = Array.isArray(rows) && rows.length >= limit;
+      writeJson(response, 200, { ok: true, messages: rows, hasMore });
     } catch (err) {
       writeJson(response, 500, { ok: false, error: String(err.message || err) });
     }
