@@ -81,9 +81,10 @@ const envCorsOrigins = (() => {
 })();
 
 function getCorsAllowedOrigins() {
-  // Dynamic config takes priority, then env var, then auto-derive from publicBaseUrl
-  const fromConfig = relayConfig?.settings?.corsAllowedOrigins;
-  if (fromConfig && fromConfig.length > 0) return fromConfig;
+  // Dynamic config takes priority: relay settings from cl_settings table
+  const fromRelaySettings = relaySettingsCache?.corsAllowedOrigins;
+  if (fromRelaySettings && fromRelaySettings.length > 0) return fromRelaySettings;
+  // Then env var
   if (envCorsOrigins) return envCorsOrigins;
   // Default: allow the public base URL origin if configured
   if (publicBaseUrl) {
@@ -329,6 +330,13 @@ async function persistMessageAsync(channelId, event, direction, senderId) {
   }
 })();
 
+// Pre-load relay settings (CORS etc.) so they're available before the first request
+void loadRelaySettings().then((s) => {
+  if (s.corsAllowedOrigins?.length > 0) {
+    console.log(`[settings] loaded CORS origins from DB: ${s.corsAllowedOrigins.join(', ')}`);
+  }
+}).catch(() => {});
+
 // ── AI Settings & LLM helpers ──
 
 const DEFAULT_SUGGESTION_PROMPT = `You are a suggestion generator for a chat interface. Based on the conversation context, generate 3-5 follow-up questions or actions from the USER's perspective (first person).
@@ -429,6 +437,51 @@ async function saveAiSettings(updates) {
 
   aiSettingsCache = merged;
   aiSettingsCacheTime = Date.now();
+}
+
+// ── Relay Settings (CORS etc.) — persisted to cl_settings key='relay' ──
+
+let relaySettingsCache = null;
+
+async function loadRelaySettings() {
+  if (relaySettingsCache) return relaySettingsCache;
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (supabaseUrl && supabaseKey) {
+    try {
+      const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_settings?key=eq.relay&select=value`, {
+        headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` },
+      });
+      if (res.ok) {
+        const rows = await res.json();
+        if (rows.length > 0 && rows[0].value) {
+          relaySettingsCache = rows[0].value;
+          return relaySettingsCache;
+        }
+      }
+    } catch { /* fall through to defaults */ }
+  }
+  relaySettingsCache = {};
+  return relaySettingsCache;
+}
+
+async function saveRelaySettings(settings) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) throw new Error('Supabase not configured');
+
+  await fetch(`${supabaseUrl}/pg/rest/v1/cl_settings`, {
+    method: 'POST',
+    headers: {
+      apikey: supabaseKey,
+      authorization: `Bearer ${supabaseKey}`,
+      'content-type': 'application/json',
+      prefer: 'resolution=merge-duplicates',
+    },
+    body: JSON.stringify({ key: 'relay', value: settings }),
+  });
+
+  relaySettingsCache = settings;
 }
 
 function buildFinalPrompt(globalPrompt, userPrompt) {
@@ -1299,13 +1352,13 @@ server.on("request", async (request, response) => {
     return;
   }
 
-  // ── Settings API (admin) ──
+  // ── Settings API (admin) — persisted to cl_settings key='relay' ──
   if (pathname === "/api/settings" && request.method === "GET") {
     if (!(await requireAdmin(request, response, url))) return;
-    const config = await relayStore.loadConfig();
+    const relaySettings = await loadRelaySettings();
     writeJson(response, 200, {
       ok: true,
-      settings: config.settings ?? {},
+      settings: relaySettings,
       _env: { CORS_ALLOWED_ORIGINS: envCorsOrigins },
     });
     return;
@@ -1315,17 +1368,15 @@ server.on("request", async (request, response) => {
     if (!(await requireAdmin(request, response, url))) return;
     try {
       const body = JSON.parse(await parseRawBody(request, 64 * 1024));
-      const config = await relayStore.loadConfig();
-      // Merge settings
+      const current = await loadRelaySettings();
+      // Merge CORS settings
       if (body.corsAllowedOrigins !== undefined) {
-        if (!config.settings) config.settings = {};
-        config.settings.corsAllowedOrigins = Array.isArray(body.corsAllowedOrigins)
+        current.corsAllowedOrigins = Array.isArray(body.corsAllowedOrigins)
           ? body.corsAllowedOrigins.map(o => String(o).trim()).filter(Boolean)
-          : body.corsAllowedOrigins === null ? undefined : undefined;
+          : [];
       }
-      await relayStore.replaceConfig(config);
-      relayConfig = config; // update in-memory
-      writeJson(response, 200, { ok: true, settings: config.settings });
+      await saveRelaySettings(current);
+      writeJson(response, 200, { ok: true, settings: current });
     } catch (err) {
       writeJson(response, 400, { ok: false, error: String(err.message || err) });
     }
