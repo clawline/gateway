@@ -194,26 +194,19 @@ let relayConfig = {
   channels: {},
 };
 
-// ── Message persistence (with in-memory retry queue) ──
+// ── Message persistence (sync with dead-letter fallback) ──
 
 const MESSAGE_TYPES_TO_PERSIST = new Set([
   'message.receive', 'message.send',
 ]);
 
-const PERSIST_RETRY_MAX = 3;
-const PERSIST_RETRY_INTERVAL_MS = 10_000;
-const persistRetryQueue = [];
+const PERSIST_MAX_RETRIES = 2;
+const PERSIST_RETRY_DELAY_MS = 1000;
+const DEAD_LETTER_PATH = require('path').join(__dirname, 'data', 'persist-failures.jsonl');
 
-function persistMessage(channelId, event, direction, senderId) {
-  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
-  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !supabaseKey || !event) return;
-
-  const eventType = event.type || '';
-  if (!MESSAGE_TYPES_TO_PERSIST.has(eventType)) return;
-
+function buildPersistRow(channelId, event, direction, senderId) {
   const data = event.data || event;
-  const row = {
+  return {
     channel_id: channelId,
     sender_id: senderId || data.senderId || null,
     agent_id: data.agentId || null,
@@ -226,44 +219,115 @@ function persistMessage(channelId, event, direction, senderId) {
     meta: data.meta ? JSON.stringify(data.meta) : null,
     timestamp: data.timestamp || Date.now(),
   };
-
-  persistToSupabase(row, supabaseUrl, supabaseKey, 0);
 }
 
-function persistToSupabase(row, supabaseUrl, supabaseKey, attempt) {
-  fetch(`${supabaseUrl}/pg/rest/v1/cl_messages`, {
-    method: 'POST',
-    headers: {
-      apikey: supabaseKey,
-      authorization: `Bearer ${supabaseKey}`,
-      'content-type': 'application/json',
-      prefer: 'return=minimal,resolution=ignore-duplicates',
-    },
-    body: JSON.stringify(row),
-  }).then((res) => {
-    if (!res.ok && res.status >= 500) {
-      enqueuePersistRetry(row, supabaseUrl, supabaseKey, attempt);
+/**
+ * Persist a message to Supabase synchronously (awaitable).
+ * Retries inline up to PERSIST_MAX_RETRIES times.
+ * On final failure, writes to dead-letter file on disk.
+ * Returns true if persisted successfully, false otherwise.
+ */
+async function persistMessageAsync(channelId, event, direction, senderId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey || !event) return true; // no-op if unconfigured
+
+  const eventType = event.type || '';
+  if (!MESSAGE_TYPES_TO_PERSIST.has(eventType)) return true;
+
+  const row = buildPersistRow(channelId, event, direction, senderId);
+
+  for (let attempt = 0; attempt <= PERSIST_MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_messages`, {
+        method: 'POST',
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+          'content-type': 'application/json',
+          prefer: 'return=minimal,resolution=ignore-duplicates',
+        },
+        body: JSON.stringify(row),
+      });
+      if (res.ok || (res.status >= 200 && res.status < 300) || res.status === 409) {
+        return true; // success or duplicate
+      }
+      if (res.status < 500) {
+        // 4xx — log but don't retry (bad data)
+        console.error(`[messages] persist rejected (${res.status}): ${row.message_id}`);
+        return false;
+      }
+      // 5xx — retry
+      if (attempt < PERSIST_MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, PERSIST_RETRY_DELAY_MS));
+      }
+    } catch (err) {
+      // Network error — retry
+      if (attempt < PERSIST_MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, PERSIST_RETRY_DELAY_MS));
+      }
     }
-  }).catch(() => {
-    enqueuePersistRetry(row, supabaseUrl, supabaseKey, attempt);
-  });
+  }
+
+  // All retries exhausted — write to dead-letter file
+  try {
+    const fs = require('fs');
+    fs.mkdirSync(require('path').dirname(DEAD_LETTER_PATH), { recursive: true });
+    fs.appendFileSync(DEAD_LETTER_PATH, JSON.stringify(row) + '\n');
+    console.error(`[messages] persist failed, written to dead-letter: ${row.message_id}`);
+  } catch (dlErr) {
+    console.error(`[messages] persist failed AND dead-letter write failed: ${row.message_id}`, dlErr);
+  }
+  return false;
 }
 
-function enqueuePersistRetry(row, supabaseUrl, supabaseKey, attempt) {
-  if (attempt >= PERSIST_RETRY_MAX) {
-    console.error(`[messages] persist failed after ${PERSIST_RETRY_MAX} retries: ${row.message_id}`);
-    return;
-  }
-  persistRetryQueue.push({ row, supabaseUrl, supabaseKey, attempt: attempt + 1 });
-}
+// On startup: replay dead-letter file
+(async function replayDeadLetters() {
+  const fs = require('fs');
+  if (!fs.existsSync(DEAD_LETTER_PATH)) return;
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) return;
 
-setInterval(() => {
-  if (persistRetryQueue.length === 0) return;
-  const batch = persistRetryQueue.splice(0, persistRetryQueue.length);
-  for (const item of batch) {
-    persistToSupabase(item.row, item.supabaseUrl, item.supabaseKey, item.attempt);
+  try {
+    const lines = fs.readFileSync(DEAD_LETTER_PATH, 'utf-8').trim().split('\n').filter(Boolean);
+    if (lines.length === 0) return;
+    console.log(`[messages] replaying ${lines.length} dead-letter messages`);
+    let succeeded = 0;
+    const remaining = [];
+    for (const line of lines) {
+      try {
+        const row = JSON.parse(line);
+        const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_messages`, {
+          method: 'POST',
+          headers: {
+            apikey: supabaseKey,
+            authorization: `Bearer ${supabaseKey}`,
+            'content-type': 'application/json',
+            prefer: 'return=minimal,resolution=ignore-duplicates',
+          },
+          body: JSON.stringify(row),
+        });
+        if (res.ok || res.status === 409) {
+          succeeded++;
+        } else {
+          remaining.push(line);
+        }
+      } catch {
+        remaining.push(line);
+      }
+    }
+    // Rewrite file with only failed items (or delete if empty)
+    if (remaining.length === 0) {
+      fs.unlinkSync(DEAD_LETTER_PATH);
+    } else {
+      fs.writeFileSync(DEAD_LETTER_PATH, remaining.join('\n') + '\n');
+    }
+    console.log(`[messages] dead-letter replay: ${succeeded} succeeded, ${remaining.length} remaining`);
+  } catch (err) {
+    console.error('[messages] dead-letter replay error:', err);
   }
-}, PERSIST_RETRY_INTERVAL_MS);
+})();
 
 // ── AI Settings & LLM helpers ──
 
@@ -813,7 +877,7 @@ backendWss.on("connection", (ws) => {
     closeSocket(ws, 1008, "missing relay.backend.hello");
   }, 5000);
 
-  ws.on("message", (raw) => {
+  ws.on("message", async (raw) => {
     let frame;
     try {
       frame = JSON.parse(raw.toString());
@@ -874,7 +938,7 @@ backendWss.on("connection", (ws) => {
       if (!client || client.channelId !== boundChannelId) {
         return;
       }
-      persistMessage(boundChannelId, frame.event, 'outbound', client.userId);
+      await persistMessageAsync(boundChannelId, frame.event, 'outbound', client.userId);
       sendJson(client.ws, frame.event);
 
       // Broadcast to sibling connections (same channelId + chatId, different connectionId)
@@ -983,7 +1047,7 @@ clientWss.on("connection", (ws, request) => {
     timestamp: Date.now(),
   });
 
-  ws.on("message", (raw) => {
+  ws.on("message", async (raw) => {
     if (!checkWsMsgRateLimit(clientRateBucket)) {
       closeClientConnection(connectionId, 1008, "rate limit exceeded");
       return;
@@ -1009,7 +1073,7 @@ clientWss.on("connection", (ws, request) => {
     }
 
     console.log(`[relay] → forwarding client event to backend ${channelId}: ${event?.type || 'unknown'}`);
-    persistMessage(channelId, event, 'inbound', authResult.authUser?.senderId);
+    await persistMessageAsync(channelId, event, 'inbound', authResult.authUser?.senderId);
 
     // Broadcast inbound message to sibling connections (so client B sees what client A sent)
     if (query.chatId && (event?.type === 'message.receive')) {
