@@ -1404,6 +1404,8 @@ server.on("request", async (request, response) => {
   }
 
   // ── GET /api/messages/sync — pull missed messages since timestamp (for offline clients) ──
+  // Supports both forward sync (after=TS) and backward pagination (before=TS)
+  // Optional agentId filter for agent-scoped history
 
   if (pathname === "/api/messages/sync" && request.method === "GET") {
     if (!(await requireAuthAny(request, response, url))) return;
@@ -1415,8 +1417,9 @@ server.on("request", async (request, response) => {
     }
     try {
       const channelId = url.searchParams.get('channelId') || '';
-      const chatId = url.searchParams.get('chatId') || '';
       const after = Number(url.searchParams.get('after')) || 0;
+      const before = Number(url.searchParams.get('before')) || 0;
+      const agentId = url.searchParams.get('agentId') || '';
       const limit = Math.min(Number(url.searchParams.get('limit')) || 100, 500);
 
       if (!channelId) {
@@ -1424,14 +1427,31 @@ server.on("request", async (request, response) => {
         return;
       }
 
-      let filter = `select=id,channel_id,sender_id,agent_id,message_id,content,content_type,direction,media_url,meta,timestamp&order=timestamp.asc&limit=${limit}`;
+      const SAFE_ID_RE = /^[a-zA-Z0-9._-]+$/;
+      if (!SAFE_ID_RE.test(channelId)) {
+        writeJson(response, 400, { ok: false, error: 'invalid channelId' });
+        return;
+      }
+      if (agentId && !SAFE_ID_RE.test(agentId)) {
+        writeJson(response, 400, { ok: false, error: 'invalid agentId' });
+        return;
+      }
+
+      // Build PostgREST query
+      const isPagingBack = before > 0 && !after;
+      let filter = `select=id,channel_id,sender_id,agent_id,message_id,content,content_type,direction,media_url,meta,timestamp`;
+      filter += `&order=timestamp.${isPagingBack ? 'desc' : 'asc'}&limit=${limit}`;
       filter += `&channel_id=eq.${encodeURIComponent(channelId)}`;
       if (after > 0) filter += `&timestamp=gt.${after}`;
+      if (before > 0) filter += `&timestamp=lt.${before}`;
+      if (agentId) filter += `&agent_id=eq.${encodeURIComponent(agentId)}`;
 
       const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_messages?${filter}`, {
         headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` },
       });
-      const rows = await res.json();
+      let rows = await res.json();
+      // When paging backward (desc order), reverse to chronological for the client
+      if (isPagingBack && Array.isArray(rows)) rows = rows.reverse();
       const hasMore = Array.isArray(rows) && rows.length >= limit;
       writeJson(response, 200, { ok: true, messages: rows, hasMore });
     } catch (err) {
