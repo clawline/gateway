@@ -1804,6 +1804,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                   <th className="px-5 py-3 text-xs font-semibold tracking-wide uppercase">Channel</th>
                   <th className="px-5 py-3 text-xs font-semibold tracking-wide uppercase">Direction</th>
                   <th className="px-5 py-3 text-xs font-semibold tracking-wide uppercase">Sender</th>
+                  <th className="px-5 py-3 text-xs font-semibold tracking-wide uppercase">Agent</th>
                   <th className="px-5 py-3 text-xs font-semibold tracking-wide uppercase">Content</th>
                 </tr>
               </thead>
@@ -1827,7 +1828,8 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                           {msg.direction === 'inbound' ? '↑ In' : '↓ Out'}
                         </span>
                       </td>
-                      <td className="px-5 py-3 text-black/48 align-top w-[90px] text-xs">{msg.sender_id || msg.agent_id || '—'}</td>
+                      <td className="px-5 py-3 text-black/48 align-top w-[90px] text-xs">{msg.sender_id || '—'}</td>
+                      <td className="px-5 py-3 text-purple-600/70 align-top w-[90px] text-xs">{msg.agent_id || '—'}</td>
                       <td className="px-5 py-3 text-[#1d1d1f] align-top">
                         {isExpanded ? (
                           <pre className="whitespace-pre-wrap break-all text-xs text-[#1d1d1f] max-h-60 overflow-y-auto">{msg.content || '—'}</pre>
