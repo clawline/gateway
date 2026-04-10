@@ -1,52 +1,33 @@
 @import "tailwindcss";
-
-/* ── Design Tokens ─────────────────────────── */
-
-:root {
-  --sidebar-bg: #1d1d1f;
-  --sidebar-w: 52px;
-  --header-h: 44px;
-  --surface: #ffffff;
-  --page-bg: #f5f5f7;
-  --text-1: #1d1d1f;
-  --text-2: #6e6e73;
-  --text-3: #aeaeb2;
-  --border: #d2d2d7;
-  --accent: #0071e3;
-  --accent-hover: #0077ed;
-  --success: #34c759;
-  --warning: #ff9500;
-  --error: #ff3b30;
-  --tab-h: 50px;
-}
+@import "@fontsource-variable/geist";
 
 /* ── Base ───────────────────────────────────── */
 
 html {
-  font-family: -apple-system, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-family: "Geist Variable", system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
 body {
   margin: 0;
-  background: var(--page-bg);
-  color: var(--text-1);
+  background: #020617;
+  color: #cbd5e1;
 }
 
 /* ── Selection ──────────────────────────────── */
 
 ::selection {
-  background: rgba(0, 113, 227, 0.15);
-  color: var(--accent);
+  background: oklch(0.35 0.08 195);
+  color: white;
 }
 
 /* ── Scrollbar ──────────────────────────────── */
 
-::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.15); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.28); }
+::-webkit-scrollbar-thumb { background: oklch(0.35 0.04 220); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: oklch(0.45 0.06 220); }
 
 /* ── Keyframes ──────────────────────────────── */
 
@@ -58,14 +39,4 @@ body {
 @keyframes fadeSlideIn {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes menuIn {
-  from { opacity: 0; transform: scale(0.96); }
-  to { opacity: 1; transform: scale(1); }
-}
-
-@keyframes modalIn {
-  from { opacity: 0; transform: scale(0.97) translateY(4px); }
-  to { opacity: 1; transform: scale(1) translateY(0); }
 }

@@ -326,9 +326,9 @@ async function apiFetch<T>(path: string, relay: RelayNode, init?: RequestInit, a
 // ── Shared UI Components ─────────────────────────────────────
 
 const inputClassName =
-  'w-full bg-[#fafafc] border-[3px] border-black/[0.04] rounded-[11px] p-3 text-[#1d1d1f] focus:outline-none focus:border-[#0071e3] focus:ring-2 focus:ring-[#0071e3]/20 transition-all text-sm placeholder:text-black/30';
+  'w-full bg-slate-900/60 border border-slate-700 p-3 text-slate-200 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/30 transition-all font-mono text-sm placeholder:text-slate-600';
 
-const labelClassName = 'text-[11px] font-semibold text-black/48 tracking-wide uppercase';
+const labelClassName = 'text-[11px] font-medium text-slate-400 tracking-widest uppercase';
 
 const CopyBtn = ({ text }: { text: string }) => {
   const [copied, setCopied] = useState(false);
@@ -338,7 +338,7 @@ const CopyBtn = ({ text }: { text: string }) => {
     window.setTimeout(() => setCopied(false), 2000);
   };
   return (
-    <button type="button" onClick={handleCopy} className="text-black/30 hover:text-[#0071e3] transition-colors">
+    <button type="button" onClick={handleCopy} className="text-slate-500 hover:text-cyan-400 transition-colors">
       {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
     </button>
   );
@@ -350,20 +350,20 @@ const Panel = ({ title, icon: Icon, children, className }: {
   children: ReactNode;
   className?: string;
 }) => (
-  <div className={cn('bg-white rounded-lg flex flex-col overflow-hidden shadow-[rgba(0,0,0,0.12)_0px_4px_24px_0px]', className)}>
-    <div className="flex items-center gap-1.5 px-4 py-3 border-b border-black/[0.06]">
-      <Icon className="w-3.5 h-3.5 text-[#0071e3]" strokeWidth={1.8} />
-      <span className="text-[11px] font-semibold text-black/48 tracking-widest uppercase">{title}</span>
+  <div className={cn('bg-slate-900/50 border border-slate-800 flex flex-col overflow-hidden', className)}>
+    <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80">
+      <Icon className="w-3.5 h-3.5 text-cyan-500" strokeWidth={1.8} />
+      <span className="text-[11px] font-medium text-slate-400 tracking-widest uppercase">{title}</span>
     </div>
-    <div className="p-4 flex-1 relative z-10 overflow-y-auto">{children}</div>
+    <div className="p-3 flex-1 relative z-10 overflow-y-auto">{children}</div>
   </div>
 );
 
 const StatusDot = ({ active }: { active: boolean }) => (
-  <span className={cn('inline-flex items-center gap-1.5 text-[10px] tracking-wider',
-    active ? 'text-emerald-600' : 'text-black/30',
+  <span className={cn('inline-flex items-center gap-1.5 text-[10px] font-mono tracking-wider',
+    active ? 'text-emerald-400' : 'text-slate-600',
   )}>
-    <span className={cn('w-1.5 h-1.5 rounded-full', active ? 'bg-emerald-500' : 'bg-black/20')} />
+    <span className={cn('w-1.5 h-1.5 rounded-full', active ? 'bg-emerald-400' : 'bg-slate-700')} />
     {active ? 'ONLINE' : 'OFFLINE'}
   </span>
 );
@@ -394,24 +394,26 @@ const ModalShell = ({
     return () => window.removeEventListener('keydown', handler);
   }, [closeDisabled, onClose]);
 
-  const isDanger = accent === 'rose';
+  const colors = accent === 'rose'
+    ? { border: 'border-rose-500/20', header: 'bg-rose-950/30 border-rose-900/40', text: 'text-rose-400', close: 'text-rose-500 hover:text-rose-300' }
+    : accent === 'fuchsia'
+    ? { border: 'border-fuchsia-500/20', header: 'bg-fuchsia-950/30 border-fuchsia-900/40', text: 'text-fuchsia-400', close: 'text-fuchsia-500 hover:text-fuchsia-300' }
+    : { border: 'border-cyan-500/20', header: 'bg-cyan-950/30 border-cyan-900/40', text: 'text-cyan-400', close: 'text-cyan-500 hover:text-cyan-300' };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-      <div className={cn('w-full bg-[#1c1c1e] flex flex-col max-h-[90vh] rounded-xl overflow-hidden', maxWidth)}>
-        <div className="px-5 py-4 border-b border-white/[0.08] flex justify-between items-center">
-          <div className="flex items-center gap-2">
-            <Icon className={cn('w-4 h-4', isDanger ? 'text-red-400' : 'text-white')} strokeWidth={1.8} />
-            <span className="text-sm font-semibold text-white tracking-tight">{title}</span>
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+      <div className={cn('w-full bg-[#0a0f1a] flex flex-col max-h-[90vh] border', maxWidth, colors.border)}>
+        <div className={cn('px-4 py-2.5 border-b flex justify-between items-center', colors.header)}>
+          <div className={cn('flex items-center gap-2', colors.text)}>
+            <Icon className="w-4 h-4" strokeWidth={1.8} />
+            <span className="text-xs font-medium tracking-widest">{title}</span>
           </div>
           <button type="button" onClick={onClose} disabled={closeDisabled}
-            className="w-7 h-7 rounded-full bg-white/10 flex items-center justify-center text-white/60 hover:bg-white/20 hover:text-white transition-colors disabled:opacity-30">
-            <X className="w-3.5 h-3.5" />
+            className={cn('transition-colors disabled:opacity-30', colors.close)}>
+            <X className="w-4 h-4" />
           </button>
         </div>
-        <div className="overflow-y-auto text-white/80">
-          {children}
-        </div>
+        {children}
       </div>
     </div>
   );
@@ -428,15 +430,15 @@ const NodeConfigModal = ({ channel, backendEndpoint, onClose }: {
   const configJson = buildPluginConfig(channel, backendEndpoint);
   return (
     <ModalShell title="NODE_CONFIG" icon={Settings} onClose={onClose}>
-      <div className="p-5 text-sm relative group overflow-y-auto">
-        <div className="absolute top-5 right-5 opacity-0 group-hover:opacity-100 transition-opacity">
+      <div className="p-4 text-xs relative group overflow-y-auto">
+        <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity">
           <CopyBtn text={configJson} />
         </div>
-        <div className="space-y-1 text-white/40 mb-4 text-xs">
-          <div>// Backend: <span className="text-[#2997ff]">{backendEndpoint}</span></div>
-          <div>// Channel: <span className="text-[#2997ff]">{channel.channelId}</span></div>
+        <div className="space-y-1 text-slate-500 mb-3">
+          <div>// Backend: <span className="text-cyan-400">{backendEndpoint}</span></div>
+          <div>// Channel: <span className="text-cyan-400">{channel.channelId}</span></div>
         </div>
-        <pre className="text-white/80 leading-relaxed overflow-x-auto text-xs">{configJson}</pre>
+        <pre className="text-slate-300 leading-relaxed overflow-x-auto font-mono">{configJson}</pre>
       </div>
     </ModalShell>
   );
@@ -453,25 +455,25 @@ const UserConnectModal = ({ user, channel, relayState, onClose }: {
   if (!user || !channel) return null;
   const connectionUrl = buildClientConnectUrl(relayState, channel, user);
   return (
-    <ModalShell title="CONNECTION_PARAMS" icon={QrCode} onClose={onClose} maxWidth="max-w-lg">
+    <ModalShell title="CONNECTION_PARAMS" icon={QrCode} accent="fuchsia" onClose={onClose} maxWidth="max-w-lg">
       <div className="p-6 flex flex-col items-center gap-5 overflow-y-auto">
-        <div className="w-full grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-sm bg-white/5 rounded-lg p-4">
-          <span className="text-white/40 text-xs">NODE</span>
-          <span className="text-white">{channel.label || channel.channelId}</span>
-          <span className="text-white/40 text-xs">USER</span>
-          <span className="text-white">{user.senderId}</span>
-          <span className="text-white/40 text-xs">TOKEN</span>
-          <span className="text-white/70 text-xs">{user.token.slice(0, 8)}…{user.token.slice(-4)}</span>
+        <div className="w-full grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs border border-fuchsia-900/30 bg-black/30 p-3">
+          <span className="text-fuchsia-600">NODE</span>
+          <span className="text-fuchsia-300">{channel.label || channel.channelId}</span>
+          <span className="text-fuchsia-600">USER</span>
+          <span className="text-fuchsia-300">{user.senderId}</span>
+          <span className="text-fuchsia-600">TOKEN</span>
+          <span className="font-mono text-fuchsia-300">{user.token.slice(0, 8)}…{user.token.slice(-4)}</span>
         </div>
-        <div className="p-3 bg-white rounded-lg">
+        <div className="p-4 bg-white">
           <QRCodeImage value={connectionUrl} size={180} />
         </div>
         <div className="w-full space-y-2">
           <div className="flex justify-between items-center">
-            <span className="text-xs text-white/40 tracking-widest uppercase">Connect URL</span>
+            <span className="text-xs text-fuchsia-500 tracking-widest">URL</span>
             <CopyBtn text={connectionUrl} />
           </div>
-          <div className="p-3 bg-white/5 rounded-lg text-xs text-[#2997ff] break-all">{connectionUrl}</div>
+          <div className="p-3 bg-black/40 border border-fuchsia-900/30 font-mono text-xs text-fuchsia-200 break-all">{connectionUrl}</div>
         </div>
       </div>
     </ModalShell>
@@ -488,20 +490,20 @@ const DiagnosticModal = ({ isOpen, isLoading, lines, onClose }: {
 }) => {
   if (!isOpen) return null;
   return (
-    <ModalShell title="Diagnostic Report" icon={Activity} onClose={onClose}>
-      <div className="p-5 space-y-2 overflow-y-auto">
+    <ModalShell title="DIAGNOSTIC_REPORT" icon={Activity} onClose={onClose}>
+      <div className="p-4 overflow-y-auto text-xs space-y-1.5">
         {isLoading ? (
-          <div className="flex items-center gap-3 text-white/60 animate-pulse py-4">
-            <RefreshCw className="w-4 h-4 animate-spin" />
-            <span className="text-sm">Scanning…</span>
+          <div className="flex items-center gap-2 text-cyan-600 animate-pulse">
+            <Activity className="w-4 h-4" />
+            <span>SCANNING…</span>
           </div>
         ) : lines.map((line, i) => (
-          <div key={`${line}-${i}`} className={cn('rounded-lg px-3 py-2 text-xs',
-            line.includes('ERR') ? 'bg-red-500/10 text-red-300 border-l-2 border-red-400' :
-            line.includes('WARN') ? 'bg-amber-500/10 text-amber-300 border-l-2 border-amber-400' :
-            'bg-white/5 text-white/60',
+          <div key={`${line}-${i}`} className={cn('border-l-2 pl-3 py-1 font-mono',
+            line.includes('ERR') ? 'border-rose-500 text-rose-400' :
+            line.includes('WARN') ? 'border-amber-500 text-amber-400' :
+            'border-slate-700 text-slate-400',
           )}>
-            <span className="text-white/30 mr-2">[{new Date().toLocaleTimeString()}]</span>
+            <span className="text-slate-600 mr-2">[{new Date().toLocaleTimeString()}]</span>
             {line}
           </div>
         ))}
@@ -521,25 +523,25 @@ const AppDialogModal = ({ state, isSubmitting, error, onClose, onConfirm }: {
 }) => {
   if (!state) return null;
   const isConfirm = state.mode === 'confirm';
-  const isDanger = state.accent === 'rose';
+  const accent = state.accent ?? (isConfirm ? 'rose' : 'cyan');
   return (
-    <ModalShell title={state.title} icon={isDanger ? ShieldAlert : Activity} accent={state.accent} onClose={onClose} maxWidth="max-w-md" closeDisabled={isSubmitting}>
-      <div className="p-6 space-y-4 overflow-y-auto">
-        <p className="text-white/80 text-[15px] leading-relaxed whitespace-pre-wrap">{state.message}</p>
-        {state.detail && <p className="text-sm text-white/40 leading-relaxed">{state.detail}</p>}
-        {error && <div className="text-red-300 text-sm bg-red-500/10 rounded-lg px-4 py-3">{error}</div>}
-        <div className="flex justify-end gap-3 pt-1">
+    <ModalShell title={state.title} icon={accent === 'rose' ? ShieldAlert : Activity} accent={accent} onClose={onClose} maxWidth="max-w-xl" closeDisabled={isSubmitting}>
+      <div className="p-4 text-sm space-y-3 overflow-y-auto">
+        <p className="text-slate-200 leading-relaxed whitespace-pre-wrap">{state.message}</p>
+        {state.detail && <p className="text-xs text-slate-500 leading-relaxed">{state.detail}</p>}
+        {error && <div className="text-rose-400 text-xs border border-rose-900/40 bg-rose-950/20 px-3 py-2">{error}</div>}
+        <div className="flex justify-end gap-3 pt-2">
           {isConfirm && (
             <button type="button" onClick={onClose} disabled={isSubmitting}
-              className="px-5 py-2 rounded-lg text-sm text-white/70 bg-white/10 hover:bg-white/15 transition-colors disabled:opacity-40">
-              {state.cancelLabel ?? 'Cancel'}
+              className="px-4 py-2 border border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-500 transition-colors disabled:opacity-40">
+              {state.cancelLabel ?? 'CANCEL'}
             </button>
           )}
           <button type="button" onClick={onConfirm} disabled={isSubmitting}
-            className={cn('min-w-[80px] px-5 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2',
-              isDanger ? 'bg-red-500 text-white hover:bg-red-600' : 'bg-[#0071e3] text-white hover:bg-[#0077ed]',
+            className={cn('min-h-[40px] px-4 py-2 border transition-colors disabled:opacity-50',
+              accent === 'rose' ? 'border-rose-700 text-rose-300 hover:bg-rose-900/50' : 'border-cyan-700 text-cyan-300 hover:bg-cyan-900/50',
             )}>
-            {isSubmitting ? <RefreshCw className="w-4 h-4 animate-spin" /> : state.confirmLabel ?? 'OK'}
+            {isSubmitting ? <RefreshCw className="w-4 h-4 animate-spin mx-auto" /> : state.confirmLabel ?? 'OK'}
           </button>
         </div>
       </div>
@@ -574,48 +576,49 @@ const ChannelFormModal = ({ state, onClose, onSubmit, isSubmitting, submitSucces
   const isEdit = state.mode === 'edit';
 
   return (
-    <ModalShell title={isEdit ? 'Edit Channel' : 'New Channel'} icon={Network} onClose={onClose} closeDisabled={isSubmitting || submitSuccess}>
-      <form onSubmit={(e: FormEvent) => { e.preventDefault(); void onSubmit(form); }} className="p-6 space-y-5 overflow-y-auto">
-        <p className="text-sm text-white/40">{isEdit ? 'Modify channel configuration.' : 'Auto-generated defaults — expand Advanced to customize.'}</p>
-        <div className="flex items-center justify-between bg-white/5 rounded-xl px-4 py-3">
-          <div className="text-sm text-white/70">
-            <span className="text-white font-medium">{form.label || form.channelId}</span>
-            {form.label && <span className="text-white/30 ml-2 text-xs">{form.channelId}</span>}
+    <ModalShell title={isEdit ? 'EDIT_CHANNEL' : 'NEW_CHANNEL'} icon={Network} onClose={onClose} closeDisabled={isSubmitting || submitSuccess}>
+      <form onSubmit={(e: FormEvent) => { e.preventDefault(); void onSubmit(form); }} className="p-4 text-sm space-y-3 overflow-y-auto">
+        <div className="text-xs text-slate-500">{isEdit ? 'Modify channel configuration' : 'Auto-generated defaults — expand Advanced to customize'}</div>
+        <div className="flex items-center justify-between px-3 py-2 bg-slate-900/60 border border-slate-800">
+          <div className="text-xs text-slate-300 font-mono">
+            <span className="text-slate-500 mr-1">ID:</span>{form.channelId}
+            <span className="text-slate-600 mx-2">│</span>
+            <span className="text-slate-500 mr-1">LABEL:</span>{form.label}
           </div>
-          <button type="button" onClick={() => setShowAdvanced(!showAdvanced)} className="text-sm text-[#2997ff] hover:underline">
-            {showAdvanced ? 'Collapse' : 'Advanced'}
+          <button type="button" onClick={() => setShowAdvanced(!showAdvanced)} className="text-xs text-cyan-500 hover:text-cyan-400">
+            {showAdvanced ? '▴ Collapse' : '▾ Advanced'}
           </button>
         </div>
         {showAdvanced && (
-          <div className="space-y-4">
-            <div className="space-y-2">
+          <div className="space-y-4 border-l-2 border-slate-800 pl-4">
+            <div className="space-y-1.5">
               <label htmlFor="ch-id" className={labelClassName}>Channel ID</label>
               <input id="ch-id" value={form.channelId} onChange={(e) => setForm((f) => ({ ...f, channelId: e.target.value }))}
                 className={inputClassName} disabled={isEdit || isSubmitting} />
             </div>
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <label htmlFor="ch-label" className={labelClassName}>Label</label>
               <input id="ch-label" value={form.label} onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
                 className={inputClassName} disabled={isSubmitting} />
             </div>
-            <div className="space-y-2">
-              <div className="flex justify-between items-center">
+            <div className="space-y-1.5">
+              <div className="flex justify-between">
                 <label htmlFor="ch-secret" className={labelClassName}>Secret</label>
                 <button type="button" onClick={() => setForm((f) => ({ ...f, secret: randomToken() }))}
-                  className="text-sm text-[#2997ff] hover:underline" disabled={isSubmitting}>Regenerate</button>
+                  className="text-xs text-cyan-500 hover:text-cyan-400" disabled={isSubmitting}>Regenerate</button>
               </div>
               <input id="ch-secret" value={form.secret} onChange={(e) => setForm((f) => ({ ...f, secret: e.target.value }))}
                 className={inputClassName} disabled={isSubmitting} />
             </div>
           </div>
         )}
-        {error && <div className="text-red-300 text-sm bg-red-500/10 rounded-lg px-4 py-3">{error}</div>}
-        <div className="flex justify-end gap-3 pt-1">
-          <button type="button" onClick={onClose} className="px-5 py-2 rounded-lg text-sm text-white/70 bg-white/10 hover:bg-white/15 transition-colors" disabled={isSubmitting}>Cancel</button>
+        {error && <div className="text-rose-400 text-xs border border-rose-900/30 bg-rose-950/20 px-3 py-2">{error}</div>}
+        <div className="flex justify-end gap-3 pt-2">
+          <button type="button" onClick={onClose} className="px-4 py-2 border border-slate-700 text-slate-400 hover:text-slate-200 transition-colors" disabled={isSubmitting}>Cancel</button>
           <button type="submit" disabled={isSubmitting || submitSuccess}
-            className={cn('min-w-[80px] px-5 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2',
-              submitSuccess ? 'bg-emerald-500 text-white' : 'bg-[#0071e3] text-white hover:bg-[#0077ed]')}>
-            {submitSuccess ? <><Check className="w-4 h-4" />Saved</> : isSubmitting ? <RefreshCw className="w-4 h-4 animate-spin" /> : isEdit ? 'Update' : 'Create'}
+            className={cn('min-h-[40px] px-4 py-2 border transition-all disabled:opacity-50',
+              submitSuccess ? 'border-emerald-500 text-emerald-300' : 'border-cyan-700 text-cyan-300 hover:bg-cyan-900/50')}>
+            {submitSuccess ? <><Check className="w-4 h-4 inline mr-1" />Saved</> : isSubmitting ? <RefreshCw className="w-4 h-4 animate-spin mx-auto" /> : isEdit ? 'Update' : 'Create'}
           </button>
         </div>
       </form>
@@ -659,55 +662,55 @@ const UserFormModal = ({ state, channel, onClose, onSubmit, isSubmitting, submit
   const isEdit = state.mode === 'edit';
 
   return (
-    <ModalShell title={isEdit ? 'Edit User' : 'Add User'} icon={Users} onClose={onClose} closeDisabled={isSubmitting || submitSuccess}>
-      <form onSubmit={(e: FormEvent) => { e.preventDefault(); void onSubmit(form); }} className="p-6 space-y-5 overflow-y-auto">
-        <p className="text-sm text-white/40">Channel: <span className="text-[#2997ff]">{channel.channelId}</span></p>
-        <div className="flex items-center justify-between bg-white/5 rounded-xl px-4 py-3">
-          <span className="text-sm text-white font-medium">{form.senderId}</span>
-          <button type="button" onClick={() => setShowAdvanced(!showAdvanced)} className="text-sm text-[#2997ff] hover:underline">
-            {showAdvanced ? 'Collapse' : 'Advanced'}
+    <ModalShell title={isEdit ? 'EDIT_USER' : 'ADD_USER'} icon={Users} onClose={onClose} closeDisabled={isSubmitting || submitSuccess}>
+      <form onSubmit={(e: FormEvent) => { e.preventDefault(); void onSubmit(form); }} className="p-4 text-sm space-y-3 overflow-y-auto">
+        <div className="text-xs text-slate-500">Channel: <span className="text-cyan-400">{channel.channelId}</span></div>
+        <div className="flex items-center justify-between px-3 py-2 bg-slate-900/60 border border-slate-800">
+          <div className="text-xs text-slate-300 font-mono"><span className="text-slate-500 mr-1">ID:</span>{form.senderId}</div>
+          <button type="button" onClick={() => setShowAdvanced(!showAdvanced)} className="text-xs text-cyan-500 hover:text-cyan-400">
+            {showAdvanced ? '▴ Collapse' : '▾ Advanced'}
           </button>
         </div>
         {showAdvanced && (
-          <div className="space-y-4">
-            <div className="space-y-2">
+          <div className="space-y-4 border-l-2 border-slate-800 pl-4">
+            <div className="space-y-1.5">
               <label htmlFor="u-sid" className={labelClassName}>Sender ID</label>
               <input id="u-sid" value={form.senderId} onChange={(e) => setForm((f) => ({ ...f, senderId: e.target.value }))}
                 className={inputClassName} disabled={isEdit || isSubmitting} />
             </div>
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <label htmlFor="u-cid" className={labelClassName}>Chat ID</label>
               <input id="u-cid" value={form.chatId} onChange={(e) => setForm((f) => ({ ...f, chatId: e.target.value }))}
                 className={inputClassName} placeholder="optional" disabled={isSubmitting} />
             </div>
-            <div className="space-y-2">
-              <div className="flex justify-between items-center">
+            <div className="space-y-1.5">
+              <div className="flex justify-between">
                 <label htmlFor="u-tok" className={labelClassName}>Token</label>
                 <button type="button" onClick={() => setForm((f) => ({ ...f, token: randomToken() }))}
-                  className="text-sm text-[#2997ff] hover:underline" disabled={isSubmitting}>Regenerate</button>
+                  className="text-xs text-cyan-500 hover:text-cyan-400" disabled={isSubmitting}>Regenerate</button>
               </div>
               <input id="u-tok" value={form.token} onChange={(e) => setForm((f) => ({ ...f, token: e.target.value }))}
                 className={inputClassName} disabled={isSubmitting} />
             </div>
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <label htmlFor="u-agents" className={labelClassName}>Allow Agents</label>
               <input id="u-agents" value={form.allowAgents} onChange={(e) => setForm((f) => ({ ...f, allowAgents: e.target.value }))}
-                className={inputClassName} placeholder="Comma-separated, blank = all" disabled={isSubmitting} />
+                className={inputClassName} placeholder="comma separated, blank = all" disabled={isSubmitting} />
             </div>
-            <label className="flex items-center gap-3 text-sm text-white/70 cursor-pointer select-none">
+            <label className="flex items-center gap-2 text-slate-300 text-xs">
               <input type="checkbox" checked={form.enabled} onChange={(e) => setForm((f) => ({ ...f, enabled: e.target.checked }))}
-                className="accent-[#0071e3] w-4 h-4" disabled={isSubmitting} />
+                className="accent-cyan-500" disabled={isSubmitting} />
               Enabled
             </label>
           </div>
         )}
-        {error && <div className="text-red-300 text-sm bg-red-500/10 rounded-lg px-4 py-3">{error}</div>}
-        <div className="flex justify-end gap-3 pt-1">
-          <button type="button" onClick={onClose} className="px-5 py-2 rounded-lg text-sm text-white/70 bg-white/10 hover:bg-white/15 transition-colors" disabled={isSubmitting}>Cancel</button>
+        {error && <div className="text-rose-400 text-xs border border-rose-900/30 bg-rose-950/20 px-3 py-2">{error}</div>}
+        <div className="flex justify-end gap-3 pt-2">
+          <button type="button" onClick={onClose} className="px-4 py-2 border border-slate-700 text-slate-400 hover:text-slate-200 transition-colors" disabled={isSubmitting}>Cancel</button>
           <button type="submit" disabled={isSubmitting || submitSuccess}
-            className={cn('min-w-[80px] px-5 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2',
-              submitSuccess ? 'bg-emerald-500 text-white' : 'bg-[#0071e3] text-white hover:bg-[#0077ed]')}>
-            {submitSuccess ? <><Check className="w-4 h-4" />Saved</> : isSubmitting ? <RefreshCw className="w-4 h-4 animate-spin" /> : isEdit ? 'Update' : 'Add'}
+            className={cn('min-h-[40px] px-4 py-2 border transition-all disabled:opacity-50',
+              submitSuccess ? 'border-emerald-500 text-emerald-300' : 'border-cyan-700 text-cyan-300 hover:bg-cyan-900/50')}>
+            {submitSuccess ? <><Check className="w-4 h-4 inline mr-1" />Saved</> : isSubmitting ? <RefreshCw className="w-4 h-4 animate-spin mx-auto" /> : isEdit ? 'Update' : 'Add'}
           </button>
         </div>
       </form>
@@ -736,10 +739,10 @@ export default function App() {
 
   if (isLogtoLoading) {
     return (
-      <div className="min-h-screen bg-black flex items-center justify-center">
-        <div className="text-center space-y-5">
-          <Hexagon className="w-10 h-10 text-white/20 mx-auto animate-pulse" strokeWidth={1} />
-          <p className="text-xs tracking-[0.2em] text-white/30 uppercase">Initializing</p>
+      <div className="min-h-screen bg-[#020617] text-cyan-500 flex items-center justify-center">
+        <div className="text-center space-y-4">
+          <Hexagon className="w-10 h-10 text-cyan-400 mx-auto animate-pulse" strokeWidth={1.2} />
+          <p className="text-xs tracking-[0.25em] text-slate-500">INITIALIZING…</p>
         </div>
       </div>
     );
@@ -747,21 +750,20 @@ export default function App() {
 
   if (!isLogtoAuth && !isDevBypass) {
     return (
-      <div className="min-h-screen bg-black text-white flex items-center justify-center">
-        <div className="w-full max-w-sm px-8 text-center space-y-8">
-          <Hexagon className="w-12 h-12 text-white mx-auto" strokeWidth={1} />
-          <div className="space-y-3">
-            <h1 style={{ fontSize: '28px', fontWeight: 600, lineHeight: 1.07, letterSpacing: '-0.28px' }} className="text-white">{GATEWAY_NAME}</h1>
-            <p className="text-white/50 text-[17px]">Sign in to continue.</p>
-          </div>
+      <div className="min-h-screen bg-[#020617] text-slate-300 flex items-center justify-center relative overflow-hidden">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_40%,oklch(0.18_0.04_220),oklch(0.06_0.02_250))] opacity-70" />
+        <div className="absolute inset-0 bg-[linear-gradient(oklch(0.4_0.03_200/0.04)_1px,transparent_1px),linear-gradient(90deg,oklch(0.4_0.03_200/0.04)_1px,transparent_1px)] bg-[size:48px_48px] [mask-image:radial-gradient(ellipse_70%_70%_at_50%_50%,#000_10%,transparent_100%)] pointer-events-none" />
+        <div className="relative z-10 w-full max-w-md p-10 bg-slate-950/80 border border-slate-800 text-center space-y-6">
+          <Hexagon className="w-10 h-10 text-cyan-500 mx-auto" strokeWidth={1.2} />
+          <h1 className="text-lg font-bold tracking-[0.3em] text-slate-200">{GATEWAY_NAME}</h1>
+          <p className="text-xs tracking-[0.2em] text-slate-500">SSO_AUTH_REQUIRED</p>
           <button type="button" onClick={() => void signIn({
             redirectUri: window.location.origin + '/callback',
             postRedirectUri: window.location.origin + '/',
             clearTokens: true,
           })}
-            style={{ borderRadius: '980px' }}
-            className="w-full py-3 bg-[#0071e3] text-white text-[17px] hover:bg-[#0077ed] transition-colors flex justify-center items-center gap-2">
-            <Lock className="w-4 h-4" /> Sign in with SSO
+            className="w-full py-3 border border-cyan-800 text-cyan-400 hover:bg-cyan-950/50 hover:border-cyan-600 transition-all text-xs tracking-[0.2em] flex justify-center items-center gap-2">
+            <Lock className="w-4 h-4" /> SIGN_IN_WITH_SSO
           </button>
         </div>
       </div>
@@ -1141,48 +1143,58 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
 
   // ── Render ─────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-[#f5f5f7] text-[#1d1d1f] flex flex-col selection:bg-[#0071e3]/15">
+    <div className="min-h-screen bg-[#020617] text-slate-300 font-sans overflow-hidden relative flex flex-col selection:bg-cyan-900 selection:text-cyan-50">
+      {/* Subtle background */}
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,oklch(0.18_0.04_220),oklch(0.06_0.02_250))] opacity-50" />
+      <div className="absolute inset-0 bg-[linear-gradient(oklch(0.4_0.03_200/0.03)_1px,transparent_1px),linear-gradient(90deg,oklch(0.4_0.03_200/0.03)_1px,transparent_1px)] bg-[size:48px_48px] [mask-image:radial-gradient(ellipse_80%_80%_at_50%_50%,#000_20%,transparent_100%)] pointer-events-none" />
 
-      {/* ── Header (Apple glass nav) ── */}
-      <header className="sticky top-0 z-50 h-12 bg-black/80 backdrop-blur-[20px] backdrop-saturate-[180%] px-5 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-4 min-w-0">
-          <div className="flex items-center gap-2 text-white shrink-0">
-            <Hexagon className="w-4 h-4" strokeWidth={1} />
-            <span className="text-sm font-semibold tracking-tight hidden sm:inline">{GATEWAY_NAME}</span>
+      {/* ── Header ── */}
+      <header className="relative z-10 border-b border-slate-800 bg-slate-950/80 backdrop-blur-md px-3 py-2 flex justify-between items-center">
+        <div className="flex items-center gap-3 lg:gap-5 min-w-0">
+          <div className="flex items-center gap-2 text-cyan-500 shrink-0">
+            <Hexagon className="w-4 h-4" strokeWidth={1.2} />
+            <span className="text-xs lg:text-sm font-bold tracking-[0.2em] hidden sm:inline">{GATEWAY_NAME}</span>
           </div>
           <StatusDot active={!!relayState} />
           {/* Relay selector */}
-          <div className="flex items-center gap-2 min-w-0">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <Server className="w-3 h-3 text-fuchsia-400 shrink-0" strokeWidth={1.8} />
             <select value={selectedRelayId}
               onChange={(e) => { setSelectedRelayId(e.target.value); setRelayState(null); }}
-              className="bg-white/10 border border-white/20 text-white text-xs px-2.5 py-1 rounded-lg focus:outline-none focus:border-white/40 cursor-pointer min-w-0">
-              {relayNodes.map((n) => <option key={n.id} value={n.id} className="bg-black text-white">{n.name}</option>)}
+              className="bg-transparent border border-slate-700 text-fuchsia-300 font-mono text-xs px-1.5 py-1 focus:outline-none focus:border-fuchsia-500 cursor-pointer min-w-0">
+              {relayNodes.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
             </select>
             <button type="button" onClick={() => { setIsRelaySettingsOpen(true); void fetchCorsOrigins(); }}
-              className="w-7 h-7 rounded-full bg-white/10 flex items-center justify-center text-white/70 hover:bg-white/20 hover:text-white transition-colors" title="Settings">
+              className="p-1.5 border border-slate-700 text-fuchsia-400 hover:text-fuchsia-300 hover:border-fuchsia-600 transition-colors" title="Settings">
               <Settings className="w-3.5 h-3.5" strokeWidth={1.8} />
             </button>
             <button type="button" onClick={() => { setIsAiSettingsOpen(true); void fetchAiSettings(); }}
-              className="w-7 h-7 rounded-full bg-white/10 flex items-center justify-center text-white/70 hover:bg-white/20 hover:text-white transition-colors" title="AI Settings">
+              className="p-1.5 border border-slate-700 text-amber-400 hover:text-amber-300 hover:border-amber-600 transition-colors" title="AI Settings">
               <Sparkles className="w-3.5 h-3.5" strokeWidth={1.8} />
+            </button>
+            <button type="button" onClick={() => { if (currentView === 'messages') { setCurrentView('dashboard'); } else { setCurrentView('messages'); void fetchMessageLog(); void fetchMessageStats(); } }}
+              className={cn('p-1.5 border transition-colors', currentView === 'messages' ? 'border-emerald-500 text-emerald-300 bg-emerald-950/40' : 'border-slate-700 text-emerald-400 hover:text-emerald-300 hover:border-emerald-600')} title="Message Log">
+              <MessageSquare className="w-3.5 h-3.5" strokeWidth={1.8} />
             </button>
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <button type="button" onClick={() => void refreshState()} disabled={isRefreshing}
-            className="w-7 h-7 rounded-full bg-white/10 flex items-center justify-center text-white/70 hover:bg-white/20 hover:text-white transition-colors disabled:opacity-40" title="Refresh">
+            className="p-1.5 lg:px-3 lg:py-1.5 border border-slate-700 hover:border-cyan-700 hover:text-cyan-400 transition-colors flex items-center gap-1.5 text-xs" title="Refresh">
             <RefreshCw className={cn('w-3.5 h-3.5', isRefreshing && 'animate-spin')} />
+            <span className="hidden lg:inline">Refresh</span>
+          </button>
+          <button type="button" onClick={onLogtoSignOut}
+            className="p-1.5 lg:px-3 lg:py-1.5 border border-slate-700 text-rose-400 hover:text-rose-300 hover:border-rose-700 transition-colors text-xs">
+            <span className="hidden sm:inline">Sign out</span>
+            <LogOut className="w-3.5 h-3.5 sm:hidden" />
           </button>
           {logtoUser && (
-            <span className="text-white/50 text-xs items-center gap-1.5 hidden md:flex" title={logtoUser.sub}>
+            <span className="text-slate-400 text-xs items-center gap-1 hidden md:flex" title={logtoUser.sub}>
+              <Users className="w-3 h-3" />
               <span className="truncate max-w-[80px]">{logtoUser.name ?? logtoUser.username ?? logtoUser.email ?? logtoUser.sub}</span>
             </span>
           )}
-          <button type="button" onClick={onLogtoSignOut}
-            style={{ borderRadius: '980px' }}
-            className="px-3 py-1 border border-white/20 text-white/70 hover:text-white hover:border-white/40 transition-colors text-xs">
-            Sign out
-          </button>
         </div>
       </header>
 
@@ -1207,36 +1219,36 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
               setSelectedRelayId(updated.id);
               setEditingRelay(null);
               setRelayState(null);
-            }} className="p-6 space-y-5">
-              <div className="space-y-2">
+            }} className="p-4 space-y-4">
+              <div className="space-y-1.5">
                 <label className={labelClassName}>Name</label>
                 <input name="name" defaultValue={editingRelay.name} className={inputClassName} required />
               </div>
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <label className={labelClassName}>URL</label>
                 <input name="url" defaultValue={editingRelay.url} placeholder="https://relay.example.com" className={inputClassName} required />
               </div>
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <label className={labelClassName}>Admin Token</label>
                 <input name="adminToken" type="password" defaultValue={editingRelay.adminToken} className={inputClassName} />
               </div>
-              <div className="flex justify-end gap-3 pt-1">
-                <button type="button" onClick={() => setEditingRelay(null)} className="px-5 py-2 rounded-lg text-sm text-white/70 bg-white/10 hover:bg-white/15 transition-colors">Cancel</button>
-                <button type="submit" className="px-5 py-2 rounded-lg text-sm font-medium bg-[#0071e3] text-white hover:bg-[#0077ed] transition-colors">Save</button>
+              <div className="flex justify-end gap-3 pt-2">
+                <button type="button" onClick={() => setEditingRelay(null)} className="px-4 py-2 border border-slate-700 text-slate-400 hover:text-slate-200 transition-colors">Cancel</button>
+                <button type="submit" className="px-4 py-2 border border-cyan-700 text-cyan-300 hover:bg-cyan-900/50 transition-colors">Save</button>
               </div>
             </form>
           ) : (
-            <div className="p-5 space-y-3">
+            <div className="p-4 space-y-3">
               {relayNodes.map((n) => (
-                <div key={n.id} className={cn('rounded-xl px-4 py-3 flex items-center justify-between gap-4',
-                  n.id === selectedRelayId ? 'bg-[#0071e3]/20 ring-1 ring-[#0071e3]/40' : 'bg-white/5')}>
+                <div key={n.id} className={cn('px-4 py-3 border flex items-center justify-between gap-4',
+                  n.id === selectedRelayId ? 'border-fuchsia-500/40 bg-fuchsia-950/20' : 'border-slate-800 bg-slate-900/40')}>
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm text-white font-medium truncate">{n.name}</div>
-                    <div className="text-xs text-white/40 truncate mt-0.5">{n.url}</div>
-                    <div className="text-xs text-white/25 mt-0.5">{n.adminToken ? '••••••••' : 'No token'}</div>
+                    <div className="text-sm text-slate-200 font-medium truncate">{n.name}</div>
+                    <div className="text-xs text-slate-500 font-mono truncate">{n.url}</div>
+                    <div className="text-xs text-slate-600">{n.adminToken ? '●●●●●●●●' : 'NO_TOKEN'}</div>
                   </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button onClick={() => setEditingRelay(n)} className="w-7 h-7 rounded-full bg-white/10 flex items-center justify-center text-white/50 hover:text-white hover:bg-white/20 transition-colors">
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button onClick={() => setEditingRelay(n)} className="p-1.5 border border-slate-700 text-slate-500 hover:text-cyan-400 hover:border-cyan-700 transition-colors">
                       <Pencil className="w-3 h-3" />
                     </button>
                     {relayNodes.length > 1 && (
@@ -1245,7 +1257,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                         const next = relayNodes.filter((x) => x.id !== n.id);
                         await updateRelayNodes(next);
                         if (selectedRelayId === n.id) { setSelectedRelayId(next[0].id); setRelayState(null); }
-                      }} className="w-7 h-7 rounded-full bg-red-500/10 flex items-center justify-center text-red-400 hover:bg-red-500/20 transition-colors">
+                      }} className="p-1.5 border border-slate-700 text-rose-500 hover:text-rose-300 hover:border-rose-700 transition-colors">
                         <Trash2 className="w-3 h-3" />
                       </button>
                     )}
@@ -1253,19 +1265,19 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                 </div>
               ))}
               <button onClick={() => setEditingRelay({ id: '', name: '', url: '', adminToken: '' })}
-                className="w-full py-3 rounded-xl border border-dashed border-white/20 text-white/40 text-sm hover:text-white/70 hover:border-white/40 transition-all flex items-center justify-center gap-2">
-                <Plus className="w-4 h-4" /> Add Relay Node
+                className="w-full py-3 border border-dashed border-slate-700 text-slate-500 text-xs hover:text-fuchsia-400 hover:border-fuchsia-700 transition-all flex items-center justify-center gap-2">
+                <Plus className="w-4 h-4" /> ADD_RELAY_NODE
               </button>
-              <div className="pt-4 border-t border-white/10 mt-2">
-                <h3 className="text-xs font-semibold text-white/40 tracking-widest uppercase mb-3">CORS Allowed Origins</h3>
-                <div className="space-y-2 mb-3">
-                  {corsOrigins.length === 0 && <p className="text-sm text-white/30">No origins configured (same-origin only)</p>}
+              <div className="pt-4 border-t border-slate-800 mt-4">
+                <h3 className="text-[11px] font-medium text-slate-400 tracking-widest uppercase mb-3">CORS Allowed Origins</h3>
+                <div className="space-y-1.5 mb-3">
+                  {corsOrigins.length === 0 && <p className="text-[11px] text-slate-600">No origins configured (same-origin only)</p>}
                   {corsOrigins.map((origin, i) => (
-                    <div key={i} className="flex items-center gap-2 bg-white/5 rounded-lg px-3 py-2">
-                      <span className="flex-1 text-sm text-white/70 truncate">{origin}</span>
+                    <div key={i} className="flex items-center gap-2 px-3 py-1.5 bg-slate-900/60 border border-slate-800">
+                      <span className="flex-1 text-xs text-slate-300 font-mono truncate">{origin}</span>
                       <button type="button" onClick={() => { const next = corsOrigins.filter((_, j) => j !== i); void saveCorsOrigins(next); }}
-                        className="text-white/30 hover:text-red-400 transition-colors">
-                        <X className="w-3.5 h-3.5" />
+                        className="text-slate-600 hover:text-rose-400 transition-colors p-0.5">
+                        <X className="w-3 h-3" />
                       </button>
                     </div>
                   ))}
@@ -1276,15 +1288,15 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                     placeholder="http://localhost:4026"
                     className={inputClassName + ' flex-1'} />
                   <button type="submit" disabled={corsSaving || !corsInput.trim()}
-                    className="px-4 py-2 rounded-[11px] bg-[#0071e3] text-white text-sm disabled:opacity-30 transition-colors shrink-0 flex items-center">
-                    {corsSaving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                    className="px-3 border border-slate-700 text-cyan-400 hover:bg-cyan-950/50 text-xs disabled:opacity-30 transition-colors shrink-0">
+                    {corsSaving ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
                   </button>
                 </form>
               </div>
-              <div className="pt-4 border-t border-white/10">
+              <div className="pt-4 border-t border-slate-800 mt-4">
                 <button type="button" onClick={() => { void runDiagnostic(); setIsRelaySettingsOpen(false); }}
-                  className="w-full py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-white/60 hover:text-white transition-colors flex items-center justify-center gap-2 text-sm">
-                  <Activity className="w-4 h-4" /> Run Diagnostic
+                  className="w-full py-2.5 border border-slate-700 text-cyan-400 hover:bg-cyan-950/50 transition-colors flex items-center justify-center gap-2 text-xs">
+                  <Activity className="w-4 h-4" /> RUN_DIAGNOSTIC
                 </button>
               </div>
             </div>
@@ -1292,39 +1304,38 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
         </ModalShell>
       )}
 
-      {/* ── AI Settings Modal ── */}
+      {/* ── AI Settings Modal (redesigned with tabs) ── */}
       {isAiSettingsOpen && (
-        <ModalShell title="AI Settings" icon={Sparkles} onClose={() => setIsAiSettingsOpen(false)} maxWidth="max-w-xl">
+        <ModalShell title="AI_SETTINGS" icon={Sparkles} onClose={() => setIsAiSettingsOpen(false)} maxWidth="max-w-xl">
           {/* Tab bar */}
-          <div className="flex border-b border-white/10 px-5 -mx-0">
+          <div className="flex border-b border-slate-800 -mx-5 px-5 mb-5">
             {([['provider', 'Provider', Globe], ['suggestions', 'Suggestions', Sparkles], ['reply', 'Reply Draft', MessageSquare], ['voice', 'Voice', Mic]] as const).map(([key, label, TabIcon]) => (
               <button key={key} type="button" onClick={() => setAiSettingsTab(key)}
-                className={cn('flex items-center gap-1.5 px-4 py-3 text-sm font-medium transition-colors border-b-2 -mb-px',
-                  aiSettingsTab === key ? 'border-[#0071e3] text-[#2997ff]' : 'border-transparent text-white/40 hover:text-white/70')}>
+                className={cn('flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium tracking-wide transition-colors border-b-2 -mb-px',
+                  aiSettingsTab === key ? 'border-amber-500 text-amber-400' : 'border-transparent text-slate-500 hover:text-slate-300')}>
                 <TabIcon className="w-3.5 h-3.5" />
                 {label}
               </button>
             ))}
           </div>
 
-          <div className="p-6">
           {/* Provider tab */}
           {aiSettingsTab === 'provider' && (
-            <div className="space-y-5">
-              <p className="text-sm text-white/40 leading-relaxed">Override the default Azure OpenAI config. Leave empty to use hardcoded defaults (gpt-5.4-mini).</p>
-              <div className="space-y-2">
+            <div className="space-y-4">
+              <p className="text-[11px] text-slate-500 leading-relaxed">Override the default Azure OpenAI config. Leave empty to use hardcoded defaults (gpt-5.4-mini).</p>
+              <div>
                 <label className={labelClassName}>Endpoint</label>
                 <input className={inputClassName} value={aiSettings.llmEndpoint}
                   onChange={e => setAiSettings(s => ({ ...s, llmEndpoint: e.target.value }))}
                   placeholder="https://resley-east-us-2-resource.openai.azure.com/openai/v1" />
               </div>
-              <div className="space-y-2">
+              <div>
                 <label className={labelClassName}>API Key</label>
                 <input className={inputClassName} type="password" value={aiSettings.llmApiKey}
                   onChange={e => setAiSettings(s => ({ ...s, llmApiKey: e.target.value }))}
                   placeholder="Already configured — enter new key to change" />
               </div>
-              <div className="space-y-2">
+              <div>
                 <label className={labelClassName}>Default Model</label>
                 <select className={inputClassName} value={aiSettings.llmModel}
                   onChange={e => setAiSettings(s => ({ ...s, llmModel: e.target.value }))}>
@@ -1333,15 +1344,19 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                     <option key={m} value={m}>{m}</option>
                   ))}
                 </select>
-                <p className="text-xs text-white/25">Used when no per-feature model is set.</p>
+                <p className="text-[10px] text-slate-600 mt-1">Used when no per-feature model is set.</p>
               </div>
             </div>
           )}
 
           {/* Suggestions tab */}
           {aiSettingsTab === 'suggestions' && (
-            <div className="space-y-5">
-              <div className="space-y-2">
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 mb-1">
+                <Sparkles className="w-4 h-4 text-amber-400" />
+                <span className="text-xs font-medium text-amber-400 tracking-widest uppercase">Smart Suggestions</span>
+              </div>
+              <div>
                 <label className={labelClassName}>Model</label>
                 <select className={inputClassName} value={aiSettings.suggestionModel}
                   onChange={e => setAiSettings(s => ({ ...s, suggestionModel: e.target.value }))}>
@@ -1350,8 +1365,9 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                     <option key={m} value={m}>{m}</option>
                   ))}
                 </select>
+                <p className="text-[10px] text-slate-600 mt-1">Override model for suggestions only. Empty = use default model above.</p>
               </div>
-              <div className="space-y-2">
+              <div>
                 <label className={labelClassName}>System Prompt</label>
                 <textarea className={inputClassName + ' min-h-[120px] resize-y'} value={aiSettings.suggestionPrompt}
                   onChange={e => setAiSettings(s => ({ ...s, suggestionPrompt: e.target.value }))}
@@ -1362,8 +1378,12 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
 
           {/* Reply Draft tab */}
           {aiSettingsTab === 'reply' && (
-            <div className="space-y-5">
-              <div className="space-y-2">
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 mb-1">
+                <MessageSquare className="w-4 h-4 text-amber-400" />
+                <span className="text-xs font-medium text-amber-400 tracking-widest uppercase">Reply Draft (Suggest Reply)</span>
+              </div>
+              <div>
                 <label className={labelClassName}>Model</label>
                 <select className={inputClassName} value={aiSettings.replyModel}
                   onChange={e => setAiSettings(s => ({ ...s, replyModel: e.target.value }))}>
@@ -1372,21 +1392,26 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                     <option key={m} value={m}>{m}</option>
                   ))}
                 </select>
+                <p className="text-[10px] text-slate-600 mt-1">Override model for Inbox "Suggest Reply" drafting. Empty = use default model above.</p>
               </div>
-              <div className="space-y-2">
+              <div>
                 <label className={labelClassName}>System Prompt</label>
                 <textarea className={inputClassName + ' min-h-[120px] resize-y'} value={aiSettings.replyPrompt || ''}
                   onChange={e => setAiSettings(s => ({ ...s, replyPrompt: e.target.value }))}
-                  placeholder="Leave empty for built-in prompt. Controls how AI drafts replies from user's perspective." />
-                <p className="text-xs text-white/25">Default: "You are a reply drafting assistant..." — override to change tone or behavior.</p>
+                  placeholder="Leave empty for built-in prompt. Controls how AI drafts replies from user's perspective. Client custom prompts are appended to this." />
+                <p className="text-[10px] text-slate-600 mt-1">Default: "You are a reply drafting assistant..." — override to change tone, language, or behavior.</p>
               </div>
             </div>
           )}
 
           {/* Voice tab */}
           {aiSettingsTab === 'voice' && (
-            <div className="space-y-5">
-              <div className="space-y-2">
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 mb-1">
+                <Mic className="w-4 h-4 text-amber-400" />
+                <span className="text-xs font-medium text-amber-400 tracking-widest uppercase">Voice Refinement</span>
+              </div>
+              <div>
                 <label className={labelClassName}>Model</label>
                 <select className={inputClassName} value={aiSettings.voiceRefineModel}
                   onChange={e => setAiSettings(s => ({ ...s, voiceRefineModel: e.target.value }))}>
@@ -1395,24 +1420,24 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                     <option key={m} value={m}>{m}</option>
                   ))}
                 </select>
+                <p className="text-[10px] text-slate-600 mt-1">Override model for voice refinement only. Empty = use default model above.</p>
               </div>
-              <div className="space-y-2">
+              <div>
                 <label className={labelClassName}>System Prompt</label>
                 <textarea className={inputClassName + ' min-h-[120px] resize-y'} value={aiSettings.voiceRefinePrompt}
                   onChange={e => setAiSettings(s => ({ ...s, voiceRefinePrompt: e.target.value }))}
-                  placeholder="Leave empty for built-in prompt." />
+                  placeholder="Leave empty for built-in prompt. User custom prompts are appended to this." />
               </div>
             </div>
           )}
 
           {/* Save button */}
-          <div className="mt-6 pt-5 border-t border-white/10">
+          <div className="mt-5 pt-4 border-t border-slate-800">
             <button type="button" onClick={() => void saveAiSettingsHandler()} disabled={aiSettingsSaving}
-              className="w-full py-3 rounded-xl bg-[#0071e3] text-white text-sm font-medium hover:bg-[#0077ed] transition-colors flex items-center justify-center gap-2 disabled:opacity-50">
-              {aiSettingsSaving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-              Save Settings
+              className="w-full py-2.5 border border-amber-700/60 text-amber-400 hover:bg-amber-950/40 transition-colors flex items-center justify-center gap-2 text-xs disabled:opacity-50">
+              {aiSettingsSaving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+              SAVE_SETTINGS
             </button>
-          </div>
           </div>
         </ModalShell>
       )}
@@ -1425,167 +1450,179 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
       <UserFormModal state={userModalState} channel={selectedChannel} onClose={() => { if (!isUserSubmitting && !userSubmitSuccess) { setUserModalState(null); setUserFormError(null); } }} onSubmit={submitUser} isSubmitting={isUserSubmitting} submitSuccess={userSubmitSuccess} error={userFormError} />
 
       {/* Toasts */}
-      <div role="status" aria-live="polite" className="fixed bottom-5 right-5 z-[200] flex flex-col gap-2 pointer-events-none">
+      <div role="status" aria-live="polite" className="fixed bottom-4 right-4 z-[200] flex flex-col gap-2 pointer-events-none">
         {toasts.map((t) => (
           <div key={t.id} className={cn(
-            'pointer-events-auto px-4 py-3 text-sm rounded-xl shadow-lg animate-[fadeSlideIn_0.3s_ease-out] flex items-center gap-3',
-            t.type === 'success' ? 'bg-[#1c1c1e] text-white border border-white/10' : 'bg-red-950 text-red-200 border border-red-500/20',
+            'pointer-events-auto px-4 py-2.5 text-sm border animate-[fadeSlideIn_0.3s_ease-out]',
+            t.type === 'success' ? 'bg-emerald-950/90 border-emerald-500/40 text-emerald-300' : 'bg-rose-950/90 border-rose-500/40 text-rose-300',
           )}>
-            {t.type === 'success' ? <Check className="w-4 h-4 text-emerald-400 shrink-0" /> : <CircleAlert className="w-4 h-4 text-red-400 shrink-0" />}
-            <span>{t.message}</span>
-            <button onClick={() => removeToast(t.id)} className="ml-1 text-white/30 hover:text-white/70 transition-colors">
-              <X className="w-3.5 h-3.5" />
-            </button>
+            <div className="flex items-center gap-2">
+              {t.type === 'success' ? <Check className="w-4 h-4" /> : <CircleAlert className="w-4 h-4" />}
+              <span>{t.message}</span>
+              <button onClick={() => removeToast(t.id)} className="ml-2 opacity-50 hover:opacity-100">×</button>
+            </div>
           </div>
         ))}
       </div>
 
       {/* ── Main Content ── */}
-      <main className="flex-1 p-5 lg:p-8 flex flex-col gap-6 max-w-[1280px] mx-auto w-full">
+      <main className="flex-1 relative z-10 p-4 lg:p-6 flex flex-col gap-5 overflow-hidden">
         {dashboardError && (
-          <div className="rounded-xl bg-red-50 border border-red-200 px-5 py-4 text-sm text-red-700">{dashboardError}</div>
+          <div className="border border-rose-900/30 bg-rose-950/20 px-4 py-3 text-xs text-rose-400">{dashboardError}</div>
         )}
 
         {/* ── View Toggle Nav ── */}
-        <div className="flex items-center gap-1 shrink-0 border-b border-black/[0.08]">
+        <div className="flex items-center gap-1 shrink-0">
           <button type="button" onClick={() => setCurrentView('dashboard')}
-            className={cn('px-4 py-3 text-sm font-medium transition-colors border-b-2 -mb-px',
-              currentView === 'dashboard' ? 'border-[#0071e3] text-[#0071e3]' : 'border-transparent text-black/48 hover:text-[#1d1d1f]')}>
-            <div className="flex items-center gap-2"><Server className="w-4 h-4" /> Dashboard</div>
+            className={cn('px-4 py-2 text-xs font-medium tracking-widest uppercase border-b-2 transition-colors',
+              currentView === 'dashboard' ? 'border-cyan-500 text-cyan-400' : 'border-transparent text-slate-500 hover:text-slate-300')}>
+            <div className="flex items-center gap-1.5"><Server className="w-3.5 h-3.5" /> Dashboard</div>
           </button>
           <button type="button" onClick={() => { setCurrentView('messages'); void fetchMessageLog(); void fetchMessageStats(); }}
-            className={cn('px-4 py-3 text-sm font-medium transition-colors border-b-2 -mb-px',
-              currentView === 'messages' ? 'border-[#0071e3] text-[#0071e3]' : 'border-transparent text-black/48 hover:text-[#1d1d1f]')}>
-            <div className="flex items-center gap-2"><MessageSquare className="w-4 h-4" /> Messages</div>
+            className={cn('px-4 py-2 text-xs font-medium tracking-widest uppercase border-b-2 transition-colors',
+              currentView === 'messages' ? 'border-emerald-500 text-emerald-400' : 'border-transparent text-slate-500 hover:text-slate-300')}>
+            <div className="flex items-center gap-1.5"><MessageSquare className="w-3.5 h-3.5" /> Messages</div>
           </button>
+          <div className="flex-1 border-b border-slate-800" />
         </div>
 
         {currentView === 'dashboard' && (<>
-        {/* Overview Stats */}
-        <div className="grid grid-cols-3 gap-4 shrink-0">
-          {[
-            { label: 'Channels', value: relayState?.channels.length ?? 0, icon: Network },
-            { label: 'Backends', value: relayState?.stats.backendCount ?? 0, icon: Server },
-            { label: 'Clients', value: relayState?.stats.clientCount ?? 0, icon: Users },
-          ].map(({ label, value, icon: Icon }) => (
-            <div key={label} className="bg-white rounded-xl p-5 shadow-[rgba(0,0,0,0.08)_0px_2px_16px_0px]">
-              <div className="flex items-center gap-2 mb-2">
-                <Icon className="w-4 h-4 text-[#0071e3]" strokeWidth={1.5} />
-                <span className="text-xs font-semibold text-black/48 tracking-wide uppercase">{label}</span>
-              </div>
-              <div className="flex items-end justify-between">
-                <span style={{ fontSize: '40px', fontWeight: 600, lineHeight: 1.07, letterSpacing: '-0.28px' }} className="text-[#1d1d1f]">{value}</span>
-                <StatusDot active={value > 0} />
-              </div>
+        {/* Overview */}
+        <Panel title="RELAY_GATEWAY" icon={Server} className="shrink-0">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-col gap-0.5 min-w-0">
+              <span className="text-sm lg:text-base font-bold text-slate-100 tracking-wide">{GATEWAY_NAME}</span>
+              <span className="font-mono text-xs text-slate-500 truncate">{gatewayEndpoint}</span>
             </div>
-          ))}
-        </div>
+            <div className="flex items-center gap-6 shrink-0">
+              <div className="flex flex-col items-end">
+                <span className="text-[10px] text-slate-500">CHANNELS</span>
+                <span className="font-mono text-xl text-cyan-400">{relayState?.channels.length ?? 0}</span>
+              </div>
+              <div className="flex flex-col items-end">
+                <span className="text-[10px] text-slate-500">BACKENDS</span>
+                <span className="font-mono text-xl text-cyan-400">{relayState?.stats.backendCount ?? 0}</span>
+              </div>
+              <div className="flex flex-col items-end">
+                <span className="text-[10px] text-slate-500">CLIENTS</span>
+                <span className="font-mono text-xl text-cyan-400">{relayState?.stats.clientCount ?? 0}</span>
+              </div>
+              <StatusDot active={gatewayStatus === 'RUNNING'} />
+            </div>
+          </div>
+        </Panel>
 
         {/* Channels + Users */}
-        <div className="flex-1 flex flex-col lg:flex-row gap-5 min-h-0">
+        <div className="flex-1 flex flex-col lg:flex-row gap-3 min-h-0">
           {/* Channel List */}
-          <Panel title="Channels" icon={Network} className="w-full lg:w-[300px] xl:w-[340px] shrink-0 flex flex-col">
-            <div className="flex-1 overflow-y-auto -mx-4 px-4 space-y-2">
+          <Panel title="CHANNELS" icon={Network} className="w-full lg:w-[280px] xl:w-[320px] flex flex-col shrink-0">
+            <div className="flex-1 overflow-y-auto space-y-1 pr-1">
               {relayState?.channels.length ? relayState.channels.map((ch) => (
                 <div key={ch.channelId} onClick={() => setSelectedChannelId(ch.channelId)}
-                  className={cn('rounded-xl px-4 py-3 transition-all cursor-pointer group relative',
-                    highlightChannelId === ch.channelId ? 'bg-[#0071e3]/10 ring-1 ring-[#0071e3]/30 animate-[highlightPulse_1s_ease-in-out_2]' :
-                    selectedChannelId === ch.channelId ? 'bg-[#0071e3]/8 ring-1 ring-[#0071e3]/20' : 'bg-[#f5f5f7] hover:bg-black/[0.04]')}>
-                  <div className="flex justify-between items-start gap-2 mb-2">
-                    <div className="min-w-0">
-                      <div className="text-[15px] font-semibold text-[#1d1d1f] truncate leading-tight">{ch.label || ch.channelId}</div>
-                      {ch.label && <div className="text-xs text-black/30 mt-0.5 truncate">{ch.channelId}</div>}
+                  className={cn('px-3 py-2 border transition-all cursor-pointer group relative',
+                    highlightChannelId === ch.channelId ? 'bg-cyan-950/30 border-cyan-400/50 animate-[highlightPulse_1s_ease-in-out_2]' :
+                    selectedChannelId === ch.channelId ? 'bg-slate-900/60 border-cyan-700/50' : 'bg-slate-900/30 border-slate-800 hover:border-slate-600')}>
+                  {selectedChannelId === ch.channelId && <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-cyan-500" />}
+                  <div className="flex justify-between items-center gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className={cn('text-sm font-medium truncate', selectedChannelId === ch.channelId ? 'text-slate-100' : 'text-slate-300')}>
+                        {ch.label || ch.channelId}
+                      </span>
+                      {ch.label && <span className="text-xs text-slate-600 shrink-0">{ch.channelId}</span>}
                     </div>
                     <StatusDot active={ch.backendConnected} />
                   </div>
-                  <div className="flex items-center gap-4 text-xs text-black/48 mb-2.5">
-                    <span><span className="text-[#1d1d1f] font-semibold">{ch.clientCount}</span> clients</span>
-                    <span><span className="text-[#1d1d1f] font-semibold">{ch.userCount}</span> users</span>
+                  <div className="flex items-center gap-4 mt-1.5 text-xs text-slate-500">
+                    <span><span className="text-slate-300">{ch.clientCount}</span> clients</span>
+                    <span><span className="text-slate-300">{ch.userCount}</span> users</span>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap justify-end gap-1 mt-1.5">
                     <button onClick={(e) => { e.stopPropagation(); setChannelModalState({ mode: 'edit', channel: ch }); setChannelFormError(null); }}
-                      className="flex-1 py-1 rounded-lg text-xs text-[#0066cc] hover:underline transition-colors text-center" title="Edit">
-                      Edit
+                      className="p-1.5 border border-slate-700 text-slate-500 hover:text-cyan-400 hover:border-cyan-700 transition-colors" title="Edit">
+                      <Pencil className="w-3 h-3" />
                     </button>
                     <button onClick={(e) => { e.stopPropagation(); setConfigChannelId(ch.channelId); }}
-                      className="flex-1 py-1 rounded-lg text-xs text-[#0066cc] hover:underline transition-colors text-center" title="Config">
-                      Config
+                      className="p-1.5 border border-slate-700 text-slate-500 hover:text-cyan-400 hover:border-cyan-700 transition-colors" title="Config">
+                      <Settings className="w-3 h-3" />
                     </button>
                     <button onClick={(e) => { e.stopPropagation(); handleDeleteChannel(ch); }}
-                      className="flex-1 py-1 rounded-lg text-xs text-red-500 hover:underline transition-colors text-center" title="Delete">
-                      Delete
+                      className="p-1.5 border border-slate-700 text-slate-500 hover:text-rose-400 hover:border-rose-700 transition-colors" title="Delete">
+                      <Trash2 className="w-3 h-3" />
                     </button>
                   </div>
                 </div>
               )) : (
-                <div className="h-full flex flex-col items-center justify-center text-black/30 text-sm py-12">
-                  <Database className="w-10 h-10 mb-3 opacity-30" />
-                  <span>No channels yet</span>
+                <div className="h-full flex flex-col items-center justify-center text-slate-600 text-sm py-8">
+                  <Database className="w-8 h-8 mb-3 opacity-50" />
+                  <span>No channels</span>
                 </div>
               )}
             </div>
             <button onClick={() => { setChannelModalState({ mode: 'create' }); setChannelFormError(null); }}
-              style={{ borderRadius: '980px' }}
-              className="mt-4 w-full py-2.5 bg-[#0071e3] text-white text-sm font-medium hover:bg-[#0077ed] transition-colors flex items-center justify-center gap-2">
-              <Plus className="w-4 h-4" /> New Channel
+              className="mt-3 w-full py-2.5 border border-dashed border-slate-700 text-slate-500 text-xs hover:text-cyan-400 hover:border-cyan-600 transition-all flex items-center justify-center gap-2">
+              <Plus className="w-4 h-4" /> NEW_CHANNEL
             </button>
           </Panel>
 
+          <div className="hidden lg:flex flex-col justify-center px-1">
+            <ChevronRight className="w-5 h-5 text-slate-800" />
+          </div>
+
           {/* User Table */}
-          <Panel title={selectedChannel ? `Users — ${selectedChannel.label || selectedChannel.channelId}` : 'Users'} icon={Users} className="flex-1 flex flex-col min-w-0">
-            <div className="flex-1 overflow-y-auto -mx-4 px-4">
+          <Panel title={`USERS · ${selectedChannel?.label || selectedChannel?.channelId || 'select channel'}`} icon={Users} className="w-full lg:flex-1 flex flex-col">
+            <div className="flex-1 overflow-y-auto">
               {!selectedChannel ? (
-                <div className="h-full flex flex-col items-center justify-center text-black/30 text-sm py-12">
-                  <ShieldAlert className="w-10 h-10 mb-3 opacity-30" />
+                <div className="h-full flex flex-col items-center justify-center text-slate-600 text-sm py-8">
+                  <ShieldAlert className="w-8 h-8 mb-3 opacity-50" />
                   <span>Select a channel</span>
                 </div>
               ) : selectedChannel.users.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center text-black/30 text-sm py-12">
-                  <Database className="w-10 h-10 mb-3 opacity-30" />
+                <div className="h-full flex flex-col items-center justify-center text-slate-600 text-sm py-8">
+                  <Database className="w-8 h-8 mb-3 opacity-50" />
                   <span>No users registered</span>
                 </div>
               ) : (
-                <table className="w-full text-left text-sm">
+                <table className="w-full text-left font-mono text-sm">
                   <caption className="sr-only">User configurations</caption>
                   <thead>
-                    <tr className="text-xs font-semibold text-black/48 border-b border-black/[0.06] uppercase tracking-wide">
-                      <th scope="col" className="pb-3 font-semibold pl-1">Sender</th>
-                      <th scope="col" className="pb-3 font-semibold">Token</th>
-                      <th scope="col" className="pb-3 font-semibold">Status</th>
-                      <th scope="col" className="pb-3 font-semibold">Chat</th>
-                      <th scope="col" className="pb-3 font-semibold text-right pr-1">Actions</th>
+                    <tr className="text-[11px] text-slate-500 border-b border-slate-800 uppercase tracking-wider">
+                      <th scope="col" className="pb-2 font-normal pl-2">Sender</th>
+                      <th scope="col" className="pb-2 font-normal">Token</th>
+                      <th scope="col" className="pb-2 font-normal">Status</th>
+                      <th scope="col" className="pb-2 font-normal">Chat</th>
+                      <th scope="col" className="pb-2 font-normal text-right pr-2">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-black/[0.04]">
+                  <tbody className="divide-y divide-slate-800/50">
                     {selectedChannel.users.map((user) => (
-                      <tr key={user.senderId} className={cn('hover:bg-black/[0.02] transition-colors group',
-                        highlightUserId === user.senderId && 'bg-[#0071e3]/5 animate-[highlightPulse_1s_ease-in-out_2]')}>
-                        <td className="py-3 pl-1">
-                          <div className="flex items-center gap-2">
-                            <Lock className="w-3.5 h-3.5 text-black/20" />
-                            <span className="text-[#1d1d1f] font-medium">{user.senderId}</span>
+                      <tr key={user.senderId} className={cn('hover:bg-slate-900/50 transition-colors group',
+                        highlightUserId === user.senderId && 'bg-cyan-950/20 animate-[highlightPulse_1s_ease-in-out_2]')}>
+                        <td className="py-2 pl-2">
+                          <div className="flex items-center gap-1.5">
+                            <Lock className="w-3 h-3 text-slate-600" />
+                            <span className="text-slate-200">{user.senderId}</span>
                           </div>
                         </td>
-                        <td className="py-3">
+                        <td className="py-2">
                           <div className="flex items-center gap-2">
-                            <span className="text-black/40 text-xs">{user.token.slice(0, 8)}…{user.token.slice(-4)}</span>
+                            <span className="text-slate-500 text-xs">{user.token.slice(0, 8)}…{user.token.slice(-4)}</span>
                             <div className="opacity-0 group-hover:opacity-100 transition-opacity"><CopyBtn text={user.token} /></div>
                           </div>
                         </td>
-                        <td className="py-3"><StatusDot active={user.enabled} /></td>
-                        <td className="py-3 text-black/48 text-sm">{user.chatId || '—'}</td>
-                        <td className="py-3 pr-1 text-right">
-                          <div className="inline-flex gap-1.5">
+                        <td className="py-2"><StatusDot active={user.enabled} /></td>
+                        <td className="py-2 text-slate-400 text-xs">{user.chatId || '—'}</td>
+                        <td className="py-2 pr-2 text-right">
+                          <div className="inline-flex gap-1">
                             <button onClick={() => setQrTarget({ channelId: selectedChannel.channelId, senderId: user.senderId })}
-                              className="w-7 h-7 rounded-full bg-[#0071e3]/10 flex items-center justify-center text-[#0071e3] hover:bg-[#0071e3]/20 transition-colors" title="Connect">
+                              className="p-1.5 border border-slate-700 text-fuchsia-400 hover:text-fuchsia-300 hover:border-fuchsia-600 transition-colors" title="Connect">
                               <QrCode className="w-3.5 h-3.5" />
                             </button>
                             <button onClick={() => { setUserModalState({ mode: 'edit', user }); setUserFormError(null); }}
-                              className="w-7 h-7 rounded-full bg-black/[0.04] flex items-center justify-center text-black/48 hover:bg-black/[0.08] hover:text-[#1d1d1f] transition-colors" title="Edit">
+                              className="p-1.5 border border-slate-700 text-slate-500 hover:text-cyan-400 hover:border-cyan-700 transition-colors" title="Edit">
                               <Pencil className="w-3.5 h-3.5" />
                             </button>
                             <button onClick={() => handleDeleteUser(user)}
-                              className="w-7 h-7 rounded-full bg-red-50 flex items-center justify-center text-red-400 hover:bg-red-100 transition-colors" title="Delete">
+                              className="p-1.5 border border-slate-700 text-slate-500 hover:text-rose-400 hover:border-rose-700 transition-colors" title="Delete">
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           </div>
@@ -1596,15 +1633,15 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                 </table>
               )}
             </div>
-            <div className="mt-4 pt-4 border-t border-black/[0.06] flex justify-between items-center gap-4">
-              <span className="text-xs text-black/30">
-                Last sync: {formatTimestamp(relayState?.timestamp)}
-              </span>
+            <div className="mt-3 pt-3 border-t border-slate-800 flex justify-between items-center gap-4">
+              <div className="font-mono text-[10px] text-slate-600 tracking-wider">
+                REFRESH: {REFRESH_INTERVAL / 1000}S
+                <span className="ml-3">SYNC: {formatTimestamp(relayState?.timestamp)}</span>
+              </div>
               <button onClick={() => { setUserModalState({ mode: 'create' }); setUserFormError(null); }}
                 disabled={!selectedChannel}
-                style={{ borderRadius: '980px' }}
-                className="px-5 py-2 bg-[#0071e3] text-white text-sm font-medium hover:bg-[#0077ed] transition-colors flex items-center gap-1.5 disabled:opacity-30 disabled:cursor-not-allowed">
-                <Plus className="w-3.5 h-3.5" /> Add User
+                className="px-3 py-1.5 border border-slate-700 text-cyan-400 font-mono text-xs hover:bg-cyan-950/50 hover:border-cyan-600 transition-colors flex items-center gap-1.5 disabled:opacity-30 disabled:cursor-not-allowed">
+                <Plus className="w-3 h-3" /> ADD_USER
               </button>
             </div>
           </Panel>
@@ -1612,52 +1649,54 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
         </>)}
 
         {currentView === 'messages' && (<>
-        {/* ── Stats Bar ── */}
+        {/* ── Stats Summary Bar ── */}
         {(() => {
           const inboundCount = messageLogRows.filter(m => m.direction === 'inbound').length;
           const outboundCount = messageLogRows.filter(m => m.direction === 'outbound').length;
           const uniqueChannels = new Set(messageLogRows.map(m => m.channel_id)).size;
           return (
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 shrink-0">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 shrink-0">
               {[
-                { label: 'Total Messages', value: messageLogTotal },
-                { label: 'Inbound', value: inboundCount },
-                { label: 'Outbound', value: outboundCount },
-                { label: 'Channels', value: uniqueChannels },
+                { label: 'TOTAL MESSAGES', value: messageLogTotal, color: 'text-cyan-400' },
+                { label: 'INBOUND', value: inboundCount, color: 'text-blue-400' },
+                { label: 'OUTBOUND', value: outboundCount, color: 'text-emerald-400' },
+                { label: 'UNIQUE CHANNELS', value: uniqueChannels, color: 'text-amber-400' },
               ].map(stat => (
-                <div key={stat.label} className="bg-white rounded-xl px-5 py-4 shadow-[rgba(0,0,0,0.08)_0px_2px_16px_0px]">
-                  <div className="text-xs font-semibold text-black/48 tracking-wide uppercase mb-1">{stat.label}</div>
-                  <div style={{ fontSize: '32px', fontWeight: 600, lineHeight: 1.07, letterSpacing: '-0.28px' }} className="text-[#1d1d1f]">{stat.value}</div>
+                <div key={stat.label} className="bg-slate-900/50 border border-slate-800 px-4 py-3">
+                  <div className="text-[10px] text-slate-500 tracking-widest uppercase">{stat.label}</div>
+                  <div className={cn('font-mono text-2xl', stat.color)}>{stat.value}</div>
                 </div>
               ))}
             </div>
           );
         })()}
 
-        {/* ── Analytics Section ── */}
-        <div className="bg-white rounded-xl shadow-[rgba(0,0,0,0.08)_0px_2px_16px_0px] shrink-0 overflow-hidden">
+        {/* ── Analytics Section (collapsible) ── */}
+        <div className="bg-slate-900/50 border border-slate-800 shrink-0">
           <button type="button" onClick={() => setMessageAnalyticsOpen(!messageAnalyticsOpen)}
-            className="w-full flex items-center gap-2 px-5 py-4 border-b border-black/[0.06] hover:bg-black/[0.02] transition-colors">
-            <BarChart3 className="w-4 h-4 text-[#0071e3]" strokeWidth={1.8} />
-            <span className="text-sm font-semibold text-[#1d1d1f]">Analytics</span>
+            className="w-full flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80 hover:bg-slate-900 transition-colors">
+            <BarChart3 className="w-3.5 h-3.5 text-amber-500" strokeWidth={1.8} />
+            <span className="text-[11px] font-medium text-slate-400 tracking-widest uppercase">Analytics</span>
             <span className="flex-1" />
-            {messageAnalyticsOpen ? <ChevronUp className="w-4 h-4 text-black/30" /> : <ChevronDown className="w-4 h-4 text-black/30" />}
+            {messageAnalyticsOpen ? <ChevronUp className="w-3.5 h-3.5 text-slate-500" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-500" />}
           </button>
           {messageAnalyticsOpen && messageStats && (
-            <div className="p-5 grid grid-cols-1 lg:grid-cols-3 gap-4">
-              {/* Messages per hour */}
-              <div className="bg-[#f5f5f7] rounded-xl overflow-hidden">
-                <div className="flex items-center gap-2 px-4 py-3 border-b border-black/[0.06]">
-                  <BarChart3 className="w-3.5 h-3.5 text-[#0071e3]" strokeWidth={1.8} />
-                  <span className="text-xs font-semibold text-black/48 tracking-wide uppercase">Messages / Hour</span>
+            <div className="p-3 grid grid-cols-1 lg:grid-cols-3 gap-3">
+              {/* Messages per hour — thin bar chart with grid */}
+              <div className="bg-slate-950/60 border border-slate-800 flex flex-col overflow-hidden">
+                <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80">
+                  <BarChart3 className="w-3.5 h-3.5 text-cyan-500/80" strokeWidth={1.8} />
+                  <span className="text-[10px] font-medium text-slate-500 tracking-[0.2em] uppercase">Messages / Hour</span>
                   <span className="flex-1" />
-                  <span className="text-[10px] text-black/30">24h</span>
+                  <span className="text-[9px] text-slate-600 font-mono">24H</span>
                 </div>
-                <div className="px-4 pt-4 pb-2 relative">
-                  <div className="absolute inset-x-4 top-4 bottom-7 flex flex-col justify-between pointer-events-none">
-                    {[0, 1, 2, 3].map(i => <div key={i} className="border-t border-black/[0.06]" />)}
+                <div className="px-3 pt-3 pb-1 relative">
+                  {/* Grid lines */}
+                  <div className="absolute inset-x-3 top-3 bottom-6 flex flex-col justify-between pointer-events-none">
+                    {[0, 1, 2, 3].map(i => <div key={i} className="border-t border-slate-800/50" />)}
                   </div>
-                  <div className="flex items-end gap-[1px] h-[80px] relative">
+                  {/* Bars */}
+                  <div className="flex items-end gap-[1px] h-[100px] relative">
                     {(() => {
                       const maxVal = Math.max(1, ...messageStats.hourly.map(h => h.inbound + h.outbound));
                       return messageStats.hourly.map((h, i) => {
@@ -1665,54 +1704,56 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                         const pct = (total / maxVal) * 100;
                         return (
                           <div key={i} className="flex-1 flex flex-col items-center justify-end h-full group relative">
-                            <div className="absolute -top-5 left-1/2 -translate-x-1/2 hidden group-hover:block bg-black/80 text-white text-[9px] px-2 py-1 rounded-md whitespace-nowrap z-10 shadow-lg">
-                              {h.hour} · ↑{h.inbound} ↓{h.outbound}
+                            <div className="absolute -top-5 left-1/2 -translate-x-1/2 hidden group-hover:block bg-slate-900 border border-slate-700 text-[8px] text-slate-300 px-1.5 py-0.5 whitespace-nowrap z-10 font-mono shadow-lg">
+                              {h.hour} · <span className="text-blue-400">↑{h.inbound}</span> <span className="text-emerald-400">↓{h.outbound}</span>
                             </div>
                             {total > 0 ? (
-                              <div style={{ height: `${Math.max(pct, 2)}%` }} className="w-full flex flex-col justify-end overflow-hidden rounded-t-sm">
-                                {h.outbound > 0 && <div style={{ flex: h.outbound }} className="bg-[#0071e3]/40 group-hover:bg-[#0071e3]/60 transition-colors min-h-[1px]" />}
-                                {h.inbound > 0 && <div style={{ flex: h.inbound }} className="bg-[#0071e3]/70 group-hover:bg-[#0071e3] transition-colors min-h-[1px]" />}
+                              <div style={{ height: `${Math.max(pct, 2)}%` }} className="w-full flex flex-col justify-end overflow-hidden">
+                                {h.outbound > 0 && <div style={{ flex: h.outbound }} className="bg-emerald-500/50 group-hover:bg-emerald-400/70 transition-colors min-h-[1px]" />}
+                                {h.inbound > 0 && <div style={{ flex: h.inbound }} className="bg-cyan-500/50 group-hover:bg-cyan-400/70 transition-colors min-h-[1px]" />}
                               </div>
                             ) : (
-                              <div className="w-full h-[1px] bg-black/10" />
+                              <div className="w-full h-[1px] bg-slate-800/80" />
                             )}
                           </div>
                         );
                       });
                     })()}
                   </div>
-                  <div className="flex mt-2">
+                  {/* Time labels */}
+                  <div className="flex mt-1.5">
                     {messageStats.hourly.map((h, i) => (
                       <div key={i} className="flex-1 text-center">
-                        {i % 4 === 0 && <span className="text-[8px] text-black/30">{h.hour}</span>}
+                        {i % 4 === 0 && <span className="text-[7px] text-slate-600 font-mono">{h.hour}</span>}
                       </div>
                     ))}
                   </div>
                 </div>
-                <div className="px-4 pb-3 flex gap-4 text-[10px] text-black/40">
-                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 bg-[#0071e3]/70 rounded-sm" /> Inbound</span>
-                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 bg-[#0071e3]/40 rounded-sm" /> Outbound</span>
+                <div className="px-3 pb-2 flex gap-4 text-[9px] text-slate-600">
+                  <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 bg-cyan-500/60 rounded-[1px]" /> In</span>
+                  <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 bg-emerald-500/60 rounded-[1px]" /> Out</span>
                 </div>
               </div>
 
-              {/* Model usage */}
-              <div className="bg-[#f5f5f7] rounded-xl overflow-hidden">
-                <div className="flex items-center gap-2 px-4 py-3 border-b border-black/[0.06]">
-                  <Activity className="w-3.5 h-3.5 text-[#0071e3]" strokeWidth={1.8} />
-                  <span className="text-xs font-semibold text-black/48 tracking-wide uppercase">Model Usage</span>
+              {/* Model usage — horizontal bars with glow */}
+              <div className="bg-slate-950/60 border border-slate-800 flex flex-col overflow-hidden">
+                <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80">
+                  <Activity className="w-3.5 h-3.5 text-cyan-500/80" strokeWidth={1.8} />
+                  <span className="text-[10px] font-medium text-slate-500 tracking-[0.2em] uppercase">Model Usage</span>
                 </div>
-                <div className="px-4 py-3 space-y-3 max-h-[160px] overflow-y-auto">
-                  {messageStats.models.length === 0 && <div className="text-black/30 text-xs py-4 text-center">No model data</div>}
+                <div className="px-3 py-3 space-y-2.5 max-h-[160px] overflow-y-auto">
+                  {messageStats.models.length === 0 && <div className="text-slate-600 text-[10px] py-4 text-center font-mono">No model data</div>}
                   {(() => {
                     const maxCount = Math.max(1, ...messageStats.models.map(m => m.count));
-                    return messageStats.models.map((m) => (
+                    const colors = ['bg-cyan-500/50', 'bg-fuchsia-500/50', 'bg-amber-500/50', 'bg-emerald-500/50', 'bg-blue-500/50'];
+                    return messageStats.models.map((m, i) => (
                       <div key={m.name}>
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-xs text-[#1d1d1f] truncate" title={m.name}>{m.name.split('/').pop()}</span>
-                          <span className="text-xs text-black/40 tabular-nums ml-2">{m.count}</span>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="text-[10px] text-slate-400 font-mono truncate" title={m.name}>{m.name.split('/').pop()}</span>
+                          <span className="text-[10px] text-slate-500 font-mono tabular-nums ml-2">{m.count}</span>
                         </div>
-                        <div className="bg-black/[0.06] h-1.5 rounded-full overflow-hidden">
-                          <div className="h-full bg-[#0071e3] rounded-full transition-all"
+                        <div className="bg-slate-800/40 h-[6px] rounded-[2px] overflow-hidden">
+                          <div className={cn('h-full rounded-[2px] transition-all', colors[i % colors.length])}
                             style={{ width: `${(m.count / maxCount) * 100}%` }} />
                         </div>
                       </div>
@@ -1721,25 +1762,29 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                 </div>
               </div>
 
-              {/* Channel activity */}
-              <div className="bg-[#f5f5f7] rounded-xl overflow-hidden">
-                <div className="flex items-center gap-2 px-4 py-3 border-b border-black/[0.06]">
-                  <Network className="w-3.5 h-3.5 text-[#0071e3]" strokeWidth={1.8} />
-                  <span className="text-xs font-semibold text-black/48 tracking-wide uppercase">Channel Activity</span>
+              {/* Channel distribution — horizontal stacked bars */}
+              <div className="bg-slate-950/60 border border-slate-800 flex flex-col overflow-hidden">
+                <div className="flex items-center gap-1.5 px-3 py-2 border-b border-slate-800 bg-slate-900/80">
+                  <Network className="w-3.5 h-3.5 text-cyan-500/80" strokeWidth={1.8} />
+                  <span className="text-[10px] font-medium text-slate-500 tracking-[0.2em] uppercase">Channel Activity</span>
                 </div>
-                <div className="px-4 py-3 space-y-3 max-h-[160px] overflow-y-auto">
-                  {messageStats.channels.length === 0 && <div className="text-black/30 text-xs py-4 text-center">No data</div>}
+                <div className="px-3 py-3 space-y-2.5 max-h-[160px] overflow-y-auto">
+                  {messageStats.channels.length === 0 && <div className="text-slate-600 text-[10px] py-4 text-center font-mono">No data</div>}
                   {(() => {
                     const maxCount = Math.max(1, ...messageStats.channels.map(c => c.inbound + c.outbound));
                     return messageStats.channels.map(c => (
                       <div key={c.name}>
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-xs text-[#0066cc] truncate">{c.name}</span>
-                          <span className="text-xs text-black/40 tabular-nums ml-2">{c.inbound}/{c.outbound}</span>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="text-[10px] text-cyan-400/80 font-mono truncate">{c.name}</span>
+                          <span className="text-[10px] text-slate-500 font-mono tabular-nums ml-2">
+                            <span className="text-blue-400/70">{c.inbound}</span>
+                            <span className="text-slate-700 mx-0.5">/</span>
+                            <span className="text-emerald-400/70">{c.outbound}</span>
+                          </span>
                         </div>
-                        <div className="bg-black/[0.06] h-1.5 rounded-full overflow-hidden flex">
-                          {c.inbound > 0 && <div className="h-full bg-[#0071e3]" style={{ width: `${(c.inbound / maxCount) * 100}%` }} />}
-                          {c.outbound > 0 && <div className="h-full bg-[#0071e3]/40" style={{ width: `${(c.outbound / maxCount) * 100}%` }} />}
+                        <div className="bg-slate-800/40 h-[6px] rounded-[2px] overflow-hidden flex">
+                          {c.inbound > 0 && <div className="h-full bg-cyan-500/50" style={{ width: `${(c.inbound / maxCount) * 100}%` }} />}
+                          {c.outbound > 0 && <div className="h-full bg-emerald-500/50" style={{ width: `${(c.outbound / maxCount) * 100}%` }} />}
                         </div>
                       </div>
                     ));
@@ -1749,17 +1794,17 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
             </div>
           )}
           {messageAnalyticsOpen && !messageStats && (
-            <div className="p-8 flex items-center justify-center text-black/30 text-sm gap-3">
-              <RefreshCw className="w-4 h-4 animate-spin" /> Loading analytics…
+            <div className="p-6 flex items-center justify-center text-slate-600 text-xs font-mono">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin mr-2" /> Loading analytics...
             </div>
           )}
         </div>
 
         {/* ── Filter Bar ── */}
-        <div className="flex flex-wrap items-center gap-3 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <select value={messageLogChannel}
             onChange={e => { setMessageLogChannel(e.target.value); setMessageLogPage(0); }}
-            className="bg-[#fafafc] border-[3px] border-black/[0.04] rounded-[11px] text-[#1d1d1f] text-sm px-3 py-2 focus:outline-none focus:border-[#0071e3] transition-colors">
+            className="bg-slate-900/60 border border-slate-700 text-slate-300 text-xs px-2.5 py-1.5 font-mono focus:outline-none focus:border-emerald-500">
             <option value="">All Channels</option>
             {relayState?.channels?.map(ch => (
               <option key={ch.channelId} value={ch.channelId}>{ch.label || ch.channelId}</option>
@@ -1767,45 +1812,45 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
           </select>
           <select value={messageLogDirection}
             onChange={e => { setMessageLogDirection(e.target.value as '' | 'inbound' | 'outbound'); setMessageLogPage(0); }}
-            className="bg-[#fafafc] border-[3px] border-black/[0.04] rounded-[11px] text-[#1d1d1f] text-sm px-3 py-2 focus:outline-none focus:border-[#0071e3] transition-colors">
+            className="bg-slate-900/60 border border-slate-700 text-slate-300 text-xs px-2.5 py-1.5 font-mono focus:outline-none focus:border-emerald-500">
             <option value="">All Directions</option>
             <option value="inbound">Inbound</option>
             <option value="outbound">Outbound</option>
           </select>
           <button type="button" onClick={() => void fetchMessageLog()} disabled={messageLogLoading}
-            className="w-9 h-9 rounded-full bg-[#0071e3]/10 flex items-center justify-center text-[#0071e3] hover:bg-[#0071e3]/20 transition-colors disabled:opacity-40">
-            <RefreshCw className={cn('w-4 h-4', messageLogLoading && 'animate-spin')} />
+            className="p-1.5 border border-slate-700 text-emerald-400 hover:border-emerald-600 transition-colors">
+            <RefreshCw className={cn('w-3.5 h-3.5', messageLogLoading && 'animate-spin')} />
           </button>
-          <label className="flex items-center gap-2 text-sm text-black/48 cursor-pointer select-none">
+          <label className="flex items-center gap-1.5 text-xs text-slate-500 ml-1 cursor-pointer select-none">
             <input type="checkbox" checked={messageLogAutoRefresh} onChange={e => setMessageLogAutoRefresh(e.target.checked)}
-              className="accent-[#0071e3]" />
-            Auto-refresh
-            {messageLogAutoRefresh && <span className="text-[#0071e3] text-xs">(10s)</span>}
+              className="accent-emerald-500" />
+            <span className="tracking-wider uppercase text-[10px]">Auto-refresh</span>
+            {messageLogAutoRefresh && <span className="text-emerald-500 text-[10px]">(10s)</span>}
           </label>
           <span className="flex-1" />
-          <span className="text-sm text-black/30 tabular-nums">{messageLogTotal} messages</span>
+          <span className="text-[10px] text-slate-500 font-mono tabular-nums">{messageLogTotal} total</span>
         </div>
 
         {/* ── Message Table ── */}
         <div className="flex-1 min-h-0 flex flex-col">
-          <div className="flex-1 overflow-y-auto bg-white rounded-xl shadow-[rgba(0,0,0,0.08)_0px_2px_16px_0px]">
+          <div className="flex-1 overflow-y-auto border border-slate-800 bg-slate-900/30">
             {messageLogRows.length === 0 && !messageLogLoading && (
-              <div className="py-16 text-center text-black/30 text-sm">No messages found</div>
+              <div className="py-12 text-center text-slate-600 text-xs">No messages found</div>
             )}
             {messageLogLoading && messageLogRows.length === 0 && (
-              <div className="py-16 text-center text-black/30 text-sm flex items-center justify-center gap-3">
-                <RefreshCw className="w-4 h-4 animate-spin" /> Loading…
+              <div className="py-12 text-center text-slate-600 text-xs flex items-center justify-center gap-2">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Loading...
               </div>
             )}
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-white/90 backdrop-blur-sm z-10">
-                <tr className="text-black/48 text-left border-b border-black/[0.06]">
-                  <th className="px-5 py-3 text-xs font-semibold tracking-wide uppercase">Time</th>
-                  <th className="px-5 py-3 text-xs font-semibold tracking-wide uppercase">Channel</th>
-                  <th className="px-5 py-3 text-xs font-semibold tracking-wide uppercase">Direction</th>
-                  <th className="px-5 py-3 text-xs font-semibold tracking-wide uppercase">Sender</th>
-                  <th className="px-5 py-3 text-xs font-semibold tracking-wide uppercase">Agent</th>
-                  <th className="px-5 py-3 text-xs font-semibold tracking-wide uppercase">Content</th>
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-slate-900/95 backdrop-blur-sm z-10">
+                <tr className="text-slate-500 text-left">
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Time</th>
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Channel</th>
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Direction</th>
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Sender</th>
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Agent</th>
+                  <th className="px-3 py-2 font-medium text-[11px] tracking-widest uppercase">Content</th>
                 </tr>
               </thead>
               <tbody>
@@ -1813,28 +1858,26 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                   const isExpanded = expandedMessageId === msg.id;
                   return (
                     <tr key={msg.id} onClick={() => setExpandedMessageId(isExpanded ? null : msg.id)}
-                      className={cn('border-t border-black/[0.04] hover:bg-black/[0.02] transition-colors cursor-pointer',
-                        isExpanded && 'bg-[#0071e3]/[0.02]')}>
-                      <td className="px-5 py-3 text-black/40 whitespace-nowrap tabular-nums align-top w-[100px] text-xs"
+                      className={cn('border-t border-slate-800/60 hover:bg-slate-800/30 transition-colors cursor-pointer',
+                        isExpanded && 'bg-slate-800/20')}>
+                      <td className="px-3 py-2 text-slate-500 whitespace-nowrap tabular-nums align-top w-[100px]"
                         title={new Date(msg.timestamp).toLocaleString()}>
                         {relativeTime(msg.timestamp)}
                       </td>
-                      <td className="px-5 py-3 text-[#0066cc] align-top w-[80px] text-xs">{msg.channel_id}</td>
-                      <td className="px-5 py-3 align-top whitespace-nowrap w-[70px]">
-                        <span className={cn('inline-flex items-center gap-1.5 text-xs',
-                          msg.direction === 'inbound' ? 'text-[#0071e3]' : 'text-emerald-600')}>
-                          <span className={cn('w-1.5 h-1.5 rounded-full',
-                            msg.direction === 'inbound' ? 'bg-[#0071e3]' : 'bg-emerald-500')} />
-                          {msg.direction === 'inbound' ? '↑ In' : '↓ Out'}
+                      <td className="px-3 py-2 text-cyan-400 font-mono align-top w-[70px]">{msg.channel_id}</td>
+                      <td className="px-3 py-2 align-top whitespace-nowrap w-[60px]">
+                        <span className={cn('inline-block w-1.5 h-1.5 rounded-full mr-1.5', msg.direction === 'inbound' ? 'bg-blue-400' : 'bg-emerald-400')} />
+                        <span className={msg.direction === 'inbound' ? 'text-blue-400' : 'text-emerald-400'}>
+                          {msg.direction === 'inbound' ? '\u2191 IN' : '\u2193 OUT'}
                         </span>
                       </td>
-                      <td className="px-5 py-3 text-black/48 align-top w-[90px] text-xs">{msg.sender_id || '—'}</td>
-                      <td className="px-5 py-3 text-purple-600/70 align-top w-[90px] text-xs">{msg.agent_id || '—'}</td>
-                      <td className="px-5 py-3 text-[#1d1d1f] align-top">
+                      <td className="px-3 py-2 text-slate-400 font-mono align-top w-[80px]">{msg.sender_id || '\u2014'}</td>
+                      <td className="px-3 py-2 text-purple-400 font-mono align-top w-[80px]">{msg.agent_id || '\u2014'}</td>
+                      <td className="px-3 py-2 text-slate-300 align-top">
                         {isExpanded ? (
-                          <pre className="whitespace-pre-wrap break-all text-xs text-[#1d1d1f] max-h-60 overflow-y-auto">{msg.content || '—'}</pre>
+                          <pre className="whitespace-pre-wrap break-all font-mono text-xs text-slate-200 max-h-60 overflow-y-auto">{msg.content || '\u2014'}</pre>
                         ) : (
-                          <span className="truncate block text-sm" title={msg.content || ''}>{msg.content?.slice(0, 200) || '—'}</span>
+                          <span className="truncate block" title={msg.content || ''}>{msg.content?.slice(0, 200) || '\u2014'}</span>
                         )}
                       </td>
                     </tr>
@@ -1845,19 +1888,17 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
           </div>
 
           {/* ── Pagination ── */}
-          <div className="flex items-center justify-between pt-4 shrink-0">
+          <div className="flex items-center justify-between pt-3 shrink-0">
             <button type="button" onClick={() => setMessageLogPage(p => Math.max(0, p - 1))} disabled={messageLogPage === 0 || messageLogLoading}
-              style={{ borderRadius: '980px' }}
-              className="px-4 py-2 border border-black/[0.12] text-[#1d1d1f] hover:bg-black/[0.04] transition-colors text-sm flex items-center gap-1.5 disabled:opacity-30 disabled:cursor-not-allowed">
-              <ChevronLeft className="w-4 h-4" /> Previous
+              className="px-3 py-1.5 border border-slate-700 text-slate-400 hover:text-cyan-400 hover:border-cyan-700 transition-colors text-xs flex items-center gap-1.5 disabled:opacity-30 disabled:cursor-not-allowed">
+              <ChevronLeft className="w-3 h-3" /> Previous
             </button>
-            <span className="text-xs text-black/40 tabular-nums">
-              {messageLogPage + 1} of {Math.max(1, Math.ceil(messageLogTotal / MESSAGE_PAGE_SIZE))}
+            <span className="text-[10px] text-slate-500 font-mono tabular-nums tracking-wider">
+              PAGE {messageLogPage + 1} / {Math.max(1, Math.ceil(messageLogTotal / MESSAGE_PAGE_SIZE))}
             </span>
             <button type="button" onClick={() => setMessageLogPage(p => p + 1)} disabled={(messageLogPage + 1) * MESSAGE_PAGE_SIZE >= messageLogTotal || messageLogLoading}
-              style={{ borderRadius: '980px' }}
-              className="px-4 py-2 border border-black/[0.12] text-[#1d1d1f] hover:bg-black/[0.04] transition-colors text-sm flex items-center gap-1.5 disabled:opacity-30 disabled:cursor-not-allowed">
-              Next <ChevronRight className="w-4 h-4" />
+              className="px-3 py-1.5 border border-slate-700 text-slate-400 hover:text-cyan-400 hover:border-cyan-700 transition-colors text-xs flex items-center gap-1.5 disabled:opacity-30 disabled:cursor-not-allowed">
+              Next <ChevronRight className="w-3 h-3" />
             </button>
           </div>
         </div>
