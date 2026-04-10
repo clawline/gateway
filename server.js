@@ -989,6 +989,8 @@ backendWss.on("connection", (ws) => {
       console.log(`[relay] ← backend ${boundChannelId} sending event to client ${frame.connectionId}: ${frame.event?.type || 'unknown'}`);
       const client = clientConnections.get(frame.connectionId);
       if (!client || client.channelId !== boundChannelId) {
+        // Client disconnected mid-reply — still persist for reconnect sync
+        await persistMessageAsync(boundChannelId, frame.event, 'outbound', null);
         return;
       }
       await persistMessageAsync(boundChannelId, frame.event, 'outbound', client.userId);
@@ -1002,6 +1004,12 @@ backendWss.on("connection", (ws) => {
           }
         }
       }
+      return;
+    }
+
+    if (frame?.type === "relay.server.persist") {
+      console.log(`[relay] ← backend ${boundChannelId} persist-only: ${frame.event?.type || 'unknown'}`);
+      await persistMessageAsync(boundChannelId, frame.event, 'outbound', frame.senderId || null);
       return;
     }
 
