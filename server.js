@@ -1,5 +1,6 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
+import fs from "node:fs";
 import { readFile, writeFile, mkdir, access, unlink, readdir, stat } from "node:fs/promises";
 import { dirname, join, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -203,7 +204,7 @@ const MESSAGE_TYPES_TO_PERSIST = new Set([
 
 const PERSIST_MAX_RETRIES = 2;
 const PERSIST_RETRY_DELAY_MS = 1000;
-const DEAD_LETTER_PATH = require('path').join(__dirname, 'data', 'persist-failures.jsonl');
+const DEAD_LETTER_PATH = join(baseDir, 'data', 'persist-failures.jsonl');
 
 function buildPersistRow(channelId, event, direction, senderId) {
   const data = event.data || event;
@@ -272,8 +273,8 @@ async function persistMessageAsync(channelId, event, direction, senderId) {
 
   // All retries exhausted — write to dead-letter file
   try {
-    const fs = require('fs');
-    fs.mkdirSync(require('path').dirname(DEAD_LETTER_PATH), { recursive: true });
+    const dir = dirname(DEAD_LETTER_PATH);
+    fs.mkdirSync(dir, { recursive: true });
     fs.appendFileSync(DEAD_LETTER_PATH, JSON.stringify(row) + '\n');
     console.error(`[messages] persist failed, written to dead-letter: ${row.message_id}`);
   } catch (dlErr) {
@@ -284,7 +285,6 @@ async function persistMessageAsync(channelId, event, direction, senderId) {
 
 // On startup: replay dead-letter file
 (async function replayDeadLetters() {
-  const fs = require('fs');
   if (!fs.existsSync(DEAD_LETTER_PATH)) return;
   const supabaseUrl = process.env.RELAY_SUPABASE_URL;
   const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
