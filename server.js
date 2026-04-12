@@ -1582,7 +1582,7 @@ server.on("request", async (request, response) => {
       filter += `&channel_id=eq.${encodeURIComponent(channelId)}`;
       if (after > 0) filter += `&timestamp=gt.${after}`;
       if (before > 0) filter += `&timestamp=lt.${before}`;
-      if (agentId) filter += `&or=(agent_id.eq.${encodeURIComponent(agentId)},agent_id.is.null)`;
+      if (agentId) filter += `&agent_id=eq.${encodeURIComponent(agentId)}`;
 
       const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_messages?${filter}`, {
         headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` },
@@ -1651,6 +1651,10 @@ server.on("request", async (request, response) => {
         writeJson(response, 400, { ok: false, error: 'channelId is required' });
         return;
       }
+      if (!agentId) {
+        writeJson(response, 400, { ok: false, error: 'agentId is required' });
+        return;
+      }
 
       const backend = backends.get(channelId);
       if (!backend || backend.ws.readyState !== 1 /* WebSocket.OPEN */) {
@@ -1672,7 +1676,7 @@ server.on("request", async (request, response) => {
           chatType: 'direct',
           senderId,
           senderName: body.senderName || senderId,
-          agentId,  // keep null if not provided — sync query will handle it
+          agentId,  // required — validated above
           messageType: 'text',
           content: message,
           timestamp: ts,
