@@ -634,6 +634,7 @@ function writeHtml(response, html) {
 }
 
 function closeSocket(ws, code, reason) {
+  if (!ws) return; // virtual/api connections have no real WS
   try {
     ws.close(code, reason);
   } catch {
@@ -993,6 +994,20 @@ backendWss.on("connection", (ws) => {
         await persistMessageAsync(boundChannelId, frame.event, 'outbound', null);
         return;
       }
+
+      // Virtual API connection — route to callback instead of WS
+      if (client.isApi) {
+        // Tag outbound event with source:"api" marker for persistence + client rendering
+        const apiEvent = frame.event;
+        if (apiEvent?.data && typeof apiEvent.data === 'object') {
+          apiEvent.data = { ...apiEvent.data, meta: { source: 'api', ...(apiEvent.data.meta || {}) } };
+        }
+        await persistMessageAsync(boundChannelId, apiEvent, 'outbound', client.userId);
+        const cb = global._apiCallbacks?.get(frame.connectionId);
+        if (cb) cb.onEvent(apiEvent);
+        return;
+      }
+
       await persistMessageAsync(boundChannelId, frame.event, 'outbound', client.userId);
       sendJson(client.ws, frame.event);
 
@@ -1609,6 +1624,160 @@ server.on("request", async (request, response) => {
       }
     } catch (err) {
       writeJson(response, 500, { ok: false, error: String(err.message || err) });
+    }
+    return;
+  }
+
+  // ── POST /api/chat — direct API chat (HTTP, no WS needed) ──
+  // Injects a virtual connection into the channel, sends the message, and waits for agent reply.
+  // Both inbound and outbound messages are persisted with meta.source="api".
+
+  if (pathname === "/api/chat" && request.method === "POST") {
+    if (!(await requireAuthAny(request, response, url))) return;
+    try {
+      const body = JSON.parse(await parseRawBody(request, 128 * 1024));
+      const message = typeof body.message === 'string' ? body.message.trim() : '';
+      const channelId = typeof body.channelId === 'string' ? body.channelId.trim() : '';
+      const agentId = typeof body.agentId === 'string' ? body.agentId.trim() : undefined;
+      const chatId = typeof body.chatId === 'string' ? body.chatId.trim() : (agentId || 'api');
+      const senderId = typeof body.senderId === 'string' ? body.senderId.trim() : 'api';
+
+      if (!message) {
+        writeJson(response, 400, { ok: false, error: 'message is required' });
+        return;
+      }
+      if (!channelId) {
+        writeJson(response, 400, { ok: false, error: 'channelId is required' });
+        return;
+      }
+
+      const backend = backends.get(channelId);
+      if (!backend || backend.ws.readyState !== 1 /* WebSocket.OPEN */) {
+        writeJson(response, 503, { ok: false, error: 'channel backend not connected' });
+        return;
+      }
+
+      const TIMEOUT_MS = 120_000; // 2 min
+      const virtualConnId = `api-${randomUUID()}`;
+      const messageId = `api-${Date.now()}-${randomUUID().slice(0, 8)}`;
+      const ts = Date.now();
+
+      // Build inbound event with source:"api" marker
+      const inboundEvent = {
+        type: 'message.receive',
+        data: {
+          messageId,
+          chatId,
+          chatType: 'direct',
+          senderId,
+          senderName: body.senderName || senderId,
+          agentId,
+          messageType: 'text',
+          content: message,
+          timestamp: ts,
+          meta: { source: 'api' },
+        },
+      };
+
+      // Persist inbound message
+      await persistMessageAsync(channelId, inboundEvent, 'inbound', senderId);
+
+      // Register virtual connection so backend replies can be routed here
+      const replyEvents = [];
+      let resolveReply;
+      let rejectReply;
+      const replyPromise = new Promise((res, rej) => {
+        resolveReply = res;
+        rejectReply = rej;
+      });
+
+      // Timeout guard
+      const timer = setTimeout(() => rejectReply(new Error('timeout')), TIMEOUT_MS);
+
+      // Temporarily register a virtual client entry so relay.server.event can route here
+      const virtualWs = null; // no real WS — we intercept via apiCallbacks
+      if (!global._apiCallbacks) global._apiCallbacks = new Map();
+      global._apiCallbacks.set(virtualConnId, {
+        onEvent(evt) {
+          replyEvents.push(evt);
+          // Resolve on final message.send
+          if (evt?.type === 'message.send') {
+            clearTimeout(timer);
+            resolveReply(replyEvents);
+          }
+        },
+        onError(err) {
+          clearTimeout(timer);
+          rejectReply(err);
+        },
+      });
+
+      // Register virtual client in clientConnections so frame routing works
+      clientConnections.set(virtualConnId, {
+        ws: virtualWs,
+        channelId,
+        chatId,
+        userId: senderId,
+        isApi: true,
+      });
+
+      // Send open frame to backend
+      sendJson(backend.ws, {
+        type: 'relay.client.open',
+        connectionId: virtualConnId,
+        query: { chatId, agentId: agentId || null, token: null },
+        authUser: { senderId, chatId, allowAgents: agentId ? [agentId] : undefined },
+        timestamp: ts,
+      });
+
+      // Small delay for backend to register the connection, then send message
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Forward the inbound event to backend
+      sendJson(backend.ws, {
+        type: 'relay.client.event',
+        connectionId: virtualConnId,
+        event: inboundEvent,
+        timestamp: ts,
+      });
+
+      // Wait for reply (or timeout)
+      let replyEvts;
+      try {
+        replyEvts = await replyPromise;
+      } finally {
+        global._apiCallbacks.delete(virtualConnId);
+        clientConnections.delete(virtualConnId);
+        // Send close frame to backend
+        sendJson(backend.ws, {
+          type: 'relay.client.close',
+          connectionId: virtualConnId,
+          code: 1000,
+          reason: 'api done',
+          timestamp: Date.now(),
+        });
+      }
+
+      // Extract final message.send event
+      const finalEvt = replyEvts.find((e) => e?.type === 'message.send');
+      const replyText = finalEvt?.data?.content || '';
+      const replyMessageId = finalEvt?.data?.messageId || null;
+
+      writeJson(response, 200, {
+        ok: true,
+        messageId: replyMessageId,
+        content: replyText,
+        agentId: finalEvt?.data?.agentId || agentId || null,
+        timestamp: finalEvt?.data?.timestamp || Date.now(),
+        meta: { source: 'api' },
+      });
+    } catch (err) {
+      if (err.message === 'timeout') {
+        writeJson(response, 504, { ok: false, error: 'agent did not respond within timeout' });
+      } else {
+        console.error('[api/chat]', err);
+        writeJson(response, 500, { ok: false, error: String(err.message || err) });
+      }
     }
     return;
   }
