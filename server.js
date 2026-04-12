@@ -1582,7 +1582,7 @@ server.on("request", async (request, response) => {
       filter += `&channel_id=eq.${encodeURIComponent(channelId)}`;
       if (after > 0) filter += `&timestamp=gt.${after}`;
       if (before > 0) filter += `&timestamp=lt.${before}`;
-      if (agentId) filter += `&agent_id=eq.${encodeURIComponent(agentId)}`;
+      if (agentId) filter += `&or=(agent_id.eq.${encodeURIComponent(agentId)},agent_id.is.null)`;
 
       const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_messages?${filter}`, {
         headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` },
@@ -1639,8 +1639,9 @@ server.on("request", async (request, response) => {
       const message = typeof body.message === 'string' ? body.message.trim() : '';
       const channelId = typeof body.channelId === 'string' ? body.channelId.trim() : '';
       const agentId = typeof body.agentId === 'string' ? body.agentId.trim() : undefined;
-      const chatId = typeof body.chatId === 'string' ? body.chatId.trim() : (agentId || 'api');
       const senderId = typeof body.senderId === 'string' ? body.senderId.trim() : 'api';
+      // chatId defaults to senderId so the virtual connection matches the WS client's chatId
+      const chatId = typeof body.chatId === 'string' ? body.chatId.trim() : senderId;
 
       if (!message) {
         writeJson(response, 400, { ok: false, error: 'message is required' });
@@ -1671,7 +1672,7 @@ server.on("request", async (request, response) => {
           chatType: 'direct',
           senderId,
           senderName: body.senderName || senderId,
-          agentId: agentId || chatId,  // always store agentId so sync query filter works
+          agentId,  // keep null if not provided — sync query will handle it
           messageType: 'text',
           content: message,
           timestamp: ts,
@@ -1681,6 +1682,13 @@ server.on("request", async (request, response) => {
 
       // Persist inbound message
       await persistMessageAsync(channelId, inboundEvent, 'inbound', senderId);
+
+      // Broadcast inbound to all WS clients on this channel so the chat UI shows it in real time
+      for (const [, conn] of clientConnections) {
+        if (conn.channelId === channelId && conn.ws && conn.ws.readyState === 1 /* OPEN */) {
+          sendJson(conn.ws, { type: 'message.send', data: { ...inboundEvent.data, direction: 'inbound', echo: true } });
+        }
+      }
 
       // Register virtual connection so backend replies can be routed here
       const replyEvents = [];
