@@ -1682,6 +1682,14 @@ server.on("request", async (request, response) => {
       // Persist inbound message
       await persistMessageAsync(channelId, inboundEvent, 'inbound', senderId);
 
+      // Broadcast inbound message to all connected WS clients on this channel+chatId
+      // (so the chat UI shows the API-originated user message in real time)
+      for (const [, conn] of clientConnections) {
+        if (conn.channelId === channelId && conn.chatId === chatId && conn.ws && conn.ws.readyState === 1 /* OPEN */) {
+          sendJson(conn.ws, { type: 'message.send', data: { ...inboundEvent.data, direction: 'inbound', echo: true } });
+        }
+      }
+
       // Register virtual connection so backend replies can be routed here
       const replyEvents = [];
       let resolveReply;
