@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- Maskable icon with safe area (80% of canvas) -->
+  <rect width="512" height="512" fill="#67B88B"/>
+  <text x="256" y="340" text-anchor="middle" font-family="system-ui, -apple-system" font-size="256" font-weight="700" fill="white">$</text>
+</svg>

@@ -2,10 +2,39 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Clawline Gateway Admin</title>
-    <script type="module" crossorigin src="/assets/index-DXC4NqD2.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CR_ZTu8C.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <meta name="theme-color" content="#EF5A23" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#1a1b2e" media="(prefers-color-scheme: dark)" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Clawline" />
+    <meta name="description" content="Clawline - Web client for OpenClaw agents" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" type="image/png" href="/icon-192.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <title>Clawline</title>
+    <!-- Force SW + cache purge on load (one-time migration for sticky iOS caches) -->
+    <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function(regs) {
+        regs.forEach(function(r) { r.update(); });
+      });
+      caches.keys().then(function(keys) {
+        var current = 'openclaw-05baa1c7';
+        keys.forEach(function(k) {
+          if (k !== current) caches.delete(k);
+        });
+      });
+    }
+    </script>
+    <script type="module" crossorigin src="/assets/index-BPMH6xzZ.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/react-vendor-C6tLJClX.js">
+    <link rel="modulepreload" crossorigin href="/assets/motion-DCI9hM2y.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-Dl3uP6cZ.css">
   </head>
   <body>
     <div id="root"></div>

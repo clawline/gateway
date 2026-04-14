@@ -208,6 +208,7 @@ const DEAD_LETTER_PATH = join(baseDir, 'data', 'persist-failures.jsonl');
 
 function buildPersistRow(channelId, event, direction, senderId) {
   const data = event.data || event;
+  console.log(`[relay-persist] direction=${direction} threadId=${data.threadId || 'NULL'} keys=${Object.keys(data).join(',')}`);
   return {
     channel_id: channelId,
     sender_id: senderId || data.senderId || null,
@@ -218,6 +219,7 @@ function buildPersistRow(channelId, event, direction, senderId) {
     direction,
     media_url: data.mediaUrl || null,
     parent_id: data.parentId || data.replyTo || null,
+    thread_id: data.threadId || null,
     meta: data.meta ? JSON.stringify(data.meta) : null,
     timestamp: data.timestamp || Date.now(),
   };
@@ -987,7 +989,9 @@ backendWss.on("connection", (ws) => {
     }
 
     if (frame?.type === "relay.server.event") {
-      console.log(`[relay] ← backend ${boundChannelId} sending event to client ${frame.connectionId}: ${frame.event?.type || 'unknown'}`);
+      const evtType = frame.event?.type || 'unknown';
+      const evtThreadId = frame.event?.data?.threadId;
+      console.log(`[relay] ← backend ${boundChannelId} sending event to client ${frame.connectionId}: ${evtType}${evtThreadId ? ` threadId=${evtThreadId}` : ''}`);
       const client = clientConnections.get(frame.connectionId);
       if (!client || client.channelId !== boundChannelId) {
         // Client disconnected mid-reply — still persist for reconnect sync
@@ -1577,7 +1581,7 @@ server.on("request", async (request, response) => {
 
       // Build PostgREST query
       const isPagingBack = before > 0 && !after;
-      let filter = `select=id,channel_id,sender_id,agent_id,message_id,content,content_type,direction,media_url,meta,timestamp`;
+      let filter = `select=id,channel_id,sender_id,agent_id,message_id,content,content_type,direction,media_url,thread_id,meta,timestamp`;
       filter += `&order=timestamp.${isPagingBack ? 'desc' : 'asc'}&limit=${limit}`;
       filter += `&channel_id=eq.${encodeURIComponent(channelId)}`;
       if (after > 0) filter += `&timestamp=gt.${after}`;
