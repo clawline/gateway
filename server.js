@@ -566,6 +566,186 @@ async function handleThreadList(connectionId, channelId, data, userId) {
   }
 }
 
+async function handleThreadUpdate(connectionId, channelId, data, senderId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  const client = clientConnections.get(connectionId);
+  if (!client) return;
+
+  if (!supabaseUrl || !supabaseKey) {
+    sendJson(client.ws, { type: 'thread.update', data: { error: 'Database not configured' } });
+    return;
+  }
+
+  const threadId = data?.threadId;
+  if (!threadId) {
+    sendJson(client.ws, { type: 'thread.update', data: { error: 'threadId is required' } });
+    return;
+  }
+
+  try {
+    // Fetch current thread to validate status transition
+    const getRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}&limit=1`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+        },
+      }
+    );
+
+    if (!getRes.ok) {
+      sendJson(client.ws, { type: 'thread.update', data: { requestId: data.requestId, error: 'Failed to fetch thread' } });
+      return;
+    }
+
+    const rows = await getRes.json();
+    if (!rows.length || rows[0].status === 'deleted') {
+      sendJson(client.ws, { type: 'thread.update', data: { requestId: data.requestId, error: 'Thread not found' } });
+      return;
+    }
+
+    const currentStatus = rows[0].status;
+
+    // Validate status transition if status change requested
+    if (data.status && data.status !== currentStatus) {
+      const allowedTransitions = {
+        active: ['archived', 'locked'],
+        archived: ['active'],
+        locked: ['active'],
+      };
+      const allowed = allowedTransitions[currentStatus] || [];
+      if (!allowed.includes(data.status)) {
+        sendJson(client.ws, {
+          type: 'thread.update',
+          data: { requestId: data.requestId, error: `Cannot transition from '${currentStatus}' to '${data.status}'` },
+        });
+        return;
+      }
+    }
+
+    // Build patch object
+    const patch = { updated_at: new Date().toISOString() };
+    if (data.title !== undefined) patch.title = data.title;
+    if (data.status) patch.status = data.status;
+
+    const updateRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+          'content-type': 'application/json',
+          prefer: 'return=representation',
+        },
+        body: JSON.stringify(patch),
+      }
+    );
+
+    if (!updateRes.ok) {
+      const errText = await updateRes.text();
+      console.error(`[threads] update failed: ${updateRes.status} ${errText}`);
+      sendJson(client.ws, { type: 'thread.update', data: { requestId: data.requestId, error: 'Failed to update thread' } });
+      return;
+    }
+
+    const [updated] = await updateRes.json();
+    const thread = mapThreadRow(updated);
+
+    // Respond to requesting client
+    sendJson(client.ws, { type: 'thread.update', data: { requestId: data.requestId, thread } });
+
+    // Broadcast thread.updated to all channel subscribers
+    broadcastToChannel(channelId, { type: 'thread.updated', data: { thread } }, connectionId);
+  } catch (err) {
+    console.error(`[threads] update error: ${err.message}`);
+    sendJson(client.ws, { type: 'thread.update', data: { requestId: data.requestId, error: 'Internal error' } });
+  }
+}
+
+async function handleThreadDelete(connectionId, channelId, data, senderId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  const client = clientConnections.get(connectionId);
+  if (!client) return;
+
+  if (!supabaseUrl || !supabaseKey) {
+    sendJson(client.ws, { type: 'thread.delete', data: { error: 'Database not configured' } });
+    return;
+  }
+
+  const threadId = data?.threadId;
+  if (!threadId) {
+    sendJson(client.ws, { type: 'thread.delete', data: { error: 'threadId is required' } });
+    return;
+  }
+
+  try {
+    // Fetch current thread to verify it exists
+    const getRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}&limit=1`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+        },
+      }
+    );
+
+    if (!getRes.ok) {
+      sendJson(client.ws, { type: 'thread.delete', data: { requestId: data.requestId, error: 'Failed to fetch thread' } });
+      return;
+    }
+
+    const rows = await getRes.json();
+    if (!rows.length || rows[0].status === 'deleted') {
+      sendJson(client.ws, { type: 'thread.delete', data: { requestId: data.requestId, error: 'Thread not found' } });
+      return;
+    }
+
+    // Soft-delete: set status to 'deleted'
+    const patch = {
+      status: 'deleted',
+      updated_at: new Date().toISOString(),
+    };
+
+    const updateRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+          'content-type': 'application/json',
+          prefer: 'return=representation',
+        },
+        body: JSON.stringify(patch),
+      }
+    );
+
+    if (!updateRes.ok) {
+      const errText = await updateRes.text();
+      console.error(`[threads] delete failed: ${updateRes.status} ${errText}`);
+      sendJson(client.ws, { type: 'thread.delete', data: { requestId: data.requestId, error: 'Failed to delete thread' } });
+      return;
+    }
+
+    const [deleted] = await updateRes.json();
+    const thread = mapThreadRow(deleted);
+
+    // Respond to requesting client
+    sendJson(client.ws, { type: 'thread.delete', data: { requestId: data.requestId, thread } });
+
+    // Broadcast thread.updated to all channel subscribers
+    broadcastToChannel(channelId, { type: 'thread.updated', data: { thread } }, connectionId);
+  } catch (err) {
+    console.error(`[threads] delete error: ${err.message}`);
+    sendJson(client.ws, { type: 'thread.delete', data: { requestId: data.requestId, error: 'Internal error' } });
+  }
+}
+
 /** Map a Supabase cl_threads row to a camelCase Thread object */
 function mapThreadRow(row) {
   return {
@@ -1357,6 +1537,14 @@ clientWss.on("connection", (ws, request) => {
     }
     if (event?.type === 'thread.list') {
       handleThreadList(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
+      return;
+    }
+    if (event?.type === 'thread.update') {
+      handleThreadUpdate(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
+      return;
+    }
+    if (event?.type === 'thread.delete') {
+      handleThreadDelete(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
       return;
     }
 
