@@ -1208,6 +1208,109 @@ async function handleAdminState(response) {
   });
 }
 
+/**
+ * GET /api/agents — return all agents across all channels with online status + metadata.
+ * Requires admin auth. Fetches live agent.list from each connected backend (parallel, 5s timeout).
+ */
+async function handleAgentList(response) {
+  const channels = listChannels();
+
+  // For each channel, if backend is connected, request agent.list.get and wait for response.
+  const results = await Promise.all(
+    channels.map(async (ch) => {
+      const base = {
+        channelId: ch.channelId,
+        label: ch.label || ch.channelId,
+        backendConnected: ch.backendConnected,
+        instanceId: ch.instanceId,
+        lastConnectedAt: ch.lastConnectedAt,
+        lastDisconnectedAt: ch.lastDisconnectedAt,
+        agents: [],
+      };
+
+      if (!ch.backendConnected) return base;
+
+      const backend = backends.get(ch.channelId);
+      if (!backend || backend.ws.readyState !== 1 /* OPEN */) return base;
+
+      // Build a temporary virtual connection to receive the agent.list response
+      const virtualConnId = `api-agentlist-${randomUUID()}`;
+      const requestId = `agentlist-${Date.now()}`;
+
+      try {
+        const agents = await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('timeout')), 5000);
+
+          // Register virtual client so relay.server.event routes here
+          if (!global._apiCallbacks) global._apiCallbacks = new Map();
+          global._apiCallbacks.set(virtualConnId, {
+            onEvent(evt) {
+              if (evt?.type === 'agent.list' && evt?.data?.requestId === requestId) {
+                clearTimeout(timer);
+                resolve(evt.data.agents || []);
+              }
+            },
+            onError(err) {
+              clearTimeout(timer);
+              reject(err);
+            },
+          });
+
+          clientConnections.set(virtualConnId, {
+            ws: null,
+            channelId: ch.channelId,
+            chatId: `api-agentlist`,
+            userId: 'api',
+            isApi: true,
+          });
+
+          // Open virtual connection to backend
+          sendJson(backend.ws, {
+            type: 'relay.client.open',
+            connectionId: virtualConnId,
+            query: { chatId: 'api-agentlist', agentId: null, token: null },
+            authUser: { senderId: 'api', chatId: 'api-agentlist' },
+            timestamp: Date.now(),
+          });
+
+          // Small delay then send agent.list.get
+          setTimeout(() => {
+            sendJson(backend.ws, {
+              type: 'relay.client.event',
+              connectionId: virtualConnId,
+              event: { type: 'agent.list.get', data: { requestId } },
+              timestamp: Date.now(),
+            });
+          }, 50);
+        });
+
+        return { ...base, agents };
+      } catch {
+        return { ...base, agents: [], error: 'agent list fetch failed or timed out' };
+      } finally {
+        global._apiCallbacks?.delete(virtualConnId);
+        clientConnections.delete(virtualConnId);
+        // Close virtual connection on backend
+        if (backend.ws.readyState === 1) {
+          sendJson(backend.ws, {
+            type: 'relay.client.close',
+            connectionId: virtualConnId,
+            code: 1000,
+            reason: 'api agentlist done',
+            timestamp: Date.now(),
+          });
+        }
+      }
+    })
+  );
+
+  writeJson(response, 200, {
+    ok: true,
+    timestamp: Date.now(),
+    channels: results,
+  });
+}
+
 async function handlePublicMeta(response) {
   writeJson(response, 200, {
     ok: true,
@@ -1828,6 +1931,13 @@ server.on("request", async (request, response) => {
 
   if (pathname === "/api/meta") {
     await handlePublicMeta(response);
+    return;
+  }
+
+  // ── GET /api/agents — all agents across all channels with status + metadata ──
+  if (pathname === "/api/agents" && request.method === "GET") {
+    if (!(await requireAdmin(request, response, url))) return;
+    await handleAgentList(response);
     return;
   }
 
