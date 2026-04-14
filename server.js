@@ -237,6 +237,244 @@ function persistMessage(channelId, event, direction, senderId) {
   });
 }
 
+// ── Thread operations (Supabase CRUD) ──
+
+function broadcastToChannel(channelId, event, excludeConnectionId) {
+  for (const [connId, client] of clientConnections) {
+    if (client.channelId === channelId && connId !== excludeConnectionId && client.ws.readyState === WebSocket.OPEN) {
+      sendJson(client.ws, event);
+    }
+  }
+}
+
+async function handleThreadCreate(connectionId, channelId, data, senderId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  const client = clientConnections.get(connectionId);
+  if (!client) return;
+
+  if (!supabaseUrl || !supabaseKey) {
+    sendJson(client.ws, { type: 'thread.create', data: { error: 'Database not configured' } });
+    return;
+  }
+
+  const parentMessageId = data?.parentMessageId;
+  if (!parentMessageId) {
+    sendJson(client.ws, { type: 'thread.create', data: { error: 'parentMessageId is required' } });
+    return;
+  }
+
+  const threadId = randomUUID();
+  const now = new Date().toISOString();
+  const row = {
+    id: threadId,
+    channel_id: channelId,
+    parent_message_id: parentMessageId,
+    creator_id: senderId || 'unknown',
+    title: data.title || null,
+    status: 'active',
+    type: 'user',
+    created_at: now,
+    updated_at: now,
+    last_reply_at: null,
+    reply_count: 0,
+    participant_ids: JSON.stringify([senderId].filter(Boolean)),
+  };
+
+  try {
+    const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_threads`, {
+      method: 'POST',
+      headers: {
+        apikey: supabaseKey,
+        authorization: `Bearer ${supabaseKey}`,
+        'content-type': 'application/json',
+        prefer: 'return=representation',
+      },
+      body: JSON.stringify(row),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error(`[threads] create failed: ${res.status} ${errText}`);
+      sendJson(client.ws, { type: 'thread.create', data: { error: 'Failed to create thread' } });
+      return;
+    }
+
+    const [created] = await res.json();
+    const thread = mapThreadRow(created);
+
+    // Respond to requesting client
+    sendJson(client.ws, { type: 'thread.create', data: { requestId: data.requestId, thread } });
+
+    // Broadcast thread.updated to all channel subscribers
+    broadcastToChannel(channelId, { type: 'thread.updated', data: { thread } }, connectionId);
+  } catch (err) {
+    console.error(`[threads] create error: ${err.message}`);
+    sendJson(client.ws, { type: 'thread.create', data: { error: 'Internal error' } });
+  }
+}
+
+async function handleThreadGet(connectionId, channelId, data, userId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  const client = clientConnections.get(connectionId);
+  if (!client) return;
+
+  if (!supabaseUrl || !supabaseKey) {
+    sendJson(client.ws, { type: 'thread.get', data: { error: 'Database not configured' } });
+    return;
+  }
+
+  const threadId = data?.threadId;
+  if (!threadId) {
+    sendJson(client.ws, { type: 'thread.get', data: { error: 'threadId is required' } });
+    return;
+  }
+
+  try {
+    // Fetch thread
+    const threadRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}&limit=1`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+        },
+      }
+    );
+
+    if (!threadRes.ok) {
+      sendJson(client.ws, { type: 'thread.get', data: { requestId: data.requestId, error: 'Failed to fetch thread' } });
+      return;
+    }
+
+    const threadRows = await threadRes.json();
+    if (!threadRows.length) {
+      sendJson(client.ws, { type: 'thread.get', data: { requestId: data.requestId, error: 'Thread not found' } });
+      return;
+    }
+
+    const threadRow = threadRows[0];
+    if (threadRow.status === 'deleted') {
+      sendJson(client.ws, { type: 'thread.get', data: { requestId: data.requestId, error: 'Thread not found' } });
+      return;
+    }
+
+    const thread = mapThreadRow(threadRow);
+
+    // Fetch last 20 messages in thread
+    const messagesRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_messages?thread_id=eq.${encodeURIComponent(threadId)}&order=timestamp.desc&limit=20`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+        },
+      }
+    );
+
+    let messages = [];
+    if (messagesRes.ok) {
+      const msgRows = await messagesRes.json();
+      messages = msgRows.reverse().map(mapMessageRow);
+    }
+
+    // Compute unread count
+    let unreadCount = 0;
+    if (userId) {
+      const readRes = await fetch(
+        `${supabaseUrl}/pg/rest/v1/cl_thread_read_status?user_id=eq.${encodeURIComponent(userId)}&thread_id=eq.${encodeURIComponent(threadId)}&limit=1`,
+        {
+          headers: {
+            apikey: supabaseKey,
+            authorization: `Bearer ${supabaseKey}`,
+          },
+        }
+      );
+
+      if (readRes.ok) {
+        const readRows = await readRes.json();
+        if (readRows.length && readRows[0].last_read_at) {
+          // Count messages created after the user's last read timestamp
+          const lastReadAt = readRows[0].last_read_at;
+          const countRes = await fetch(
+            `${supabaseUrl}/pg/rest/v1/cl_messages?thread_id=eq.${encodeURIComponent(threadId)}&created_at=gt.${encodeURIComponent(lastReadAt)}&select=message_id`,
+            {
+              headers: {
+                apikey: supabaseKey,
+                authorization: `Bearer ${supabaseKey}`,
+                prefer: 'count=exact',
+              },
+            }
+          );
+          if (countRes.ok) {
+            const contentRange = countRes.headers.get('content-range');
+            if (contentRange) {
+              const match = contentRange.match(/\/(\d+)/);
+              if (match) unreadCount = parseInt(match[1], 10);
+            }
+          }
+        } else {
+          // No read status — all replies are unread
+          unreadCount = thread.replyCount;
+        }
+      } else {
+        unreadCount = thread.replyCount;
+      }
+    }
+
+    sendJson(client.ws, {
+      type: 'thread.get',
+      data: {
+        requestId: data.requestId,
+        thread,
+        messages,
+        unreadCount,
+      },
+    });
+  } catch (err) {
+    console.error(`[threads] get error: ${err.message}`);
+    sendJson(client.ws, { type: 'thread.get', data: { requestId: data.requestId, error: 'Internal error' } });
+  }
+}
+
+/** Map a Supabase cl_threads row to a camelCase Thread object */
+function mapThreadRow(row) {
+  return {
+    id: row.id,
+    channelId: row.channel_id,
+    parentMessageId: row.parent_message_id,
+    creatorId: row.creator_id,
+    title: row.title || null,
+    status: row.status,
+    type: row.type,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastReplyAt: row.last_reply_at || null,
+    replyCount: row.reply_count ?? 0,
+    participantIds: Array.isArray(row.participant_ids) ? row.participant_ids : JSON.parse(row.participant_ids || '[]'),
+  };
+}
+
+/** Map a Supabase cl_messages row to a camelCase message object */
+function mapMessageRow(row) {
+  return {
+    messageId: row.message_id,
+    chatId: row.channel_id,
+    senderId: row.sender_id,
+    agentId: row.agent_id,
+    content: row.content,
+    contentType: row.content_type,
+    direction: row.direction,
+    mediaUrl: row.media_url,
+    parentId: row.parent_id,
+    threadId: row.thread_id,
+    meta: row.meta,
+    timestamp: row.timestamp,
+    createdAt: row.created_at,
+  };
+}
+
 // ── AI Settings & LLM helpers ──
 
 const DEFAULT_SUGGESTION_PROMPT = `You are a suggestion generator for a chat interface. Based on the conversation context, generate 3-5 follow-up questions or actions from the USER's perspective (first person).
@@ -977,6 +1215,16 @@ clientWss.on("connection", (ws, request) => {
     // Respond to client heartbeat pings directly (don't forward to backend)
     if (event?.type === 'ping') {
       sendJson(ws, { type: 'pong', data: { timestamp: Date.now() } });
+      return;
+    }
+
+    // Handle thread events directly in gateway (requires Supabase access)
+    if (event?.type === 'thread.create') {
+      handleThreadCreate(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
+      return;
+    }
+    if (event?.type === 'thread.get') {
+      handleThreadGet(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
       return;
     }
 
