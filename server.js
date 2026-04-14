@@ -209,6 +209,7 @@ function persistMessage(channelId, event, direction, senderId) {
   if (!MESSAGE_TYPES_TO_PERSIST.has(eventType)) return;
 
   const data = event.data || event;
+  const threadId = data.threadId || null;
   const row = {
     channel_id: channelId,
     sender_id: senderId || data.senderId || null,
@@ -219,6 +220,7 @@ function persistMessage(channelId, event, direction, senderId) {
     direction,
     media_url: data.mediaUrl || null,
     parent_id: data.parentId || data.replyTo || null,
+    thread_id: threadId,
     meta: data.meta ? JSON.stringify(data.meta) : null,
     timestamp: data.timestamp || Date.now(),
   };
@@ -232,9 +234,103 @@ function persistMessage(channelId, event, direction, senderId) {
       prefer: 'return=minimal,resolution=ignore-duplicates',
     },
     body: JSON.stringify(row),
+  }).then((res) => {
+    if (res.ok && threadId) {
+      updateThreadOnNewReply(
+        channelId, threadId,
+        senderId || data.senderId || null,
+        data.messageId || null,
+        data.content || data.text || null
+      );
+    }
   }).catch((err) => {
     console.warn(`[messages] persist failed: ${err.message}`);
   });
+}
+
+/**
+ * Update thread metadata when a new reply message is persisted.
+ * Increments reply_count, sets last_reply_at, appends sender to participant_ids,
+ * and broadcasts thread.updated + thread.new_reply events.
+ */
+async function updateThreadOnNewReply(channelId, threadId, senderId, messageId, content) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) return;
+
+  try {
+    // 1. Fetch current thread
+    const getRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}&limit=1`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+        },
+      }
+    );
+    const threads = await getRes.json();
+    if (!threads.length) return;
+    const thread = threads[0];
+
+    // Skip if thread is deleted
+    if (thread.status === 'deleted') return;
+
+    // 2. Build update payload
+    const now = new Date().toISOString();
+    const participantIds = Array.isArray(thread.participant_ids)
+      ? thread.participant_ids
+      : JSON.parse(thread.participant_ids || '[]');
+
+    if (senderId && !participantIds.includes(senderId)) {
+      participantIds.push(senderId);
+    }
+
+    const updateRow = {
+      reply_count: (thread.reply_count || 0) + 1,
+      last_reply_at: now,
+      participant_ids: JSON.stringify(participantIds),
+      updated_at: now,
+    };
+
+    // 3. Update the thread
+    const patchRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+          'content-type': 'application/json',
+          prefer: 'return=representation',
+        },
+        body: JSON.stringify(updateRow),
+      }
+    );
+    const updatedRows = await patchRes.json();
+    if (!updatedRows.length) return;
+    const updatedThread = updatedRows[0];
+
+    // 4. Broadcast thread.updated to all channel subscribers
+    broadcastToChannel(channelId, {
+      type: 'thread.updated',
+      data: { thread: mapThreadRow(updatedThread) },
+    });
+
+    // 5. Broadcast thread.new_reply to all channel subscribers
+    const preview = (content || '').substring(0, 100);
+    broadcastToChannel(channelId, {
+      type: 'thread.new_reply',
+      data: {
+        threadId,
+        messageId: messageId || null,
+        senderId: senderId || null,
+        preview,
+      },
+    });
+  } catch (err) {
+    console.warn(`[threads] metadata update failed for thread ${threadId}: ${err.message}`);
+  }
 }
 
 // ── Thread operations (Supabase CRUD) ──
