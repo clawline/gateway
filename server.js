@@ -907,6 +907,81 @@ async function handleThreadMarkRead(connectionId, channelId, data, userId) {
   }
 }
 
+/**
+ * Handle thread.search — search messages within a thread by text content.
+ * Uses PostgREST ilike for case-insensitive substring matching on cl_messages.content.
+ */
+async function handleThreadSearch(connectionId, channelId, data, userId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  const client = clientConnections.get(connectionId);
+  if (!client) return;
+
+  if (!supabaseUrl || !supabaseKey) {
+    sendJson(client.ws, { type: 'thread.search', data: { error: 'Database not configured' } });
+    return;
+  }
+
+  const threadId = normalizeThreadId(data?.threadId);
+  if (!threadId) {
+    sendJson(client.ws, { type: 'thread.search', data: { requestId: data?.requestId, error: 'threadId is required' } });
+    return;
+  }
+  const query = (data?.query || '').trim();
+  if (!query) {
+    sendJson(client.ws, { type: 'thread.search', data: { requestId: data?.requestId, error: 'query is required' } });
+    return;
+  }
+
+  try {
+    // Search messages in this thread using ilike (case-insensitive substring match)
+    const encodedQuery = encodeURIComponent(`*${query}*`);
+    const searchRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_messages?thread_id=eq.${encodeURIComponent(threadId)}&content=ilike.${encodedQuery}&order=timestamp.asc&limit=50`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+          prefer: 'count=exact',
+        },
+      }
+    );
+
+    if (!searchRes.ok) {
+      const errText = await searchRes.text();
+      console.error(`[threads] search failed: ${searchRes.status} ${errText}`);
+      sendJson(client.ws, { type: 'thread.search', data: { requestId: data.requestId, error: 'Search failed' } });
+      return;
+    }
+
+    const msgRows = await searchRes.json();
+    const total = (() => {
+      const contentRange = searchRes.headers.get('content-range');
+      if (contentRange) {
+        const match = contentRange.match(/\/(\d+)/);
+        if (match) return parseInt(match[1], 10);
+      }
+      return msgRows.length;
+    })();
+
+    const messages = msgRows.map(mapMessageRow);
+
+    sendJson(client.ws, {
+      type: 'thread.search',
+      data: {
+        requestId: data.requestId,
+        query,
+        threadId,
+        messages,
+        total,
+      },
+    });
+  } catch (err) {
+    console.error(`[threads] search error: ${err.message}`);
+    sendJson(client.ws, { type: 'thread.search', data: { requestId: data.requestId, error: 'Internal error' } });
+  }
+}
+
 /** Map a Supabase cl_threads row to a camelCase Thread object */
 function mapThreadRow(row) {
   return {
@@ -1710,6 +1785,10 @@ clientWss.on("connection", (ws, request) => {
     }
     if (event?.type === 'thread.mark_read') {
       handleThreadMarkRead(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
+      return;
+    }
+    if (event?.type === 'thread.search') {
+      handleThreadSearch(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
       return;
     }
 
