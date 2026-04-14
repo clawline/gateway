@@ -1756,8 +1756,26 @@ server.on("request", async (request, response) => {
       const channelId = typeof body.channelId === 'string' ? body.channelId.trim() : '';
       const agentId = typeof body.agentId === 'string' ? body.agentId.trim() : undefined;
       const senderId = typeof body.senderId === 'string' ? body.senderId.trim() : 'api';
-      // chatId defaults to senderId so the virtual connection matches the WS client's chatId
-      const chatId = typeof body.chatId === 'string' ? body.chatId.trim() : senderId;
+
+      // chatId resolution:
+      // 1. Explicit chatId in request body → use as-is
+      // 2. No chatId → look for an active real WS client on this channel+agentId and borrow its chatId
+      //    (so API messages land in the same conversation as the real user)
+      // 3. Fallback → senderId (legacy behaviour)
+      let chatId;
+      if (typeof body.chatId === 'string' && body.chatId.trim()) {
+        chatId = body.chatId.trim();
+      } else {
+        // Find the first real (non-API) WS connection on this channel scoped to the requested agentId
+        let found;
+        for (const [, conn] of clientConnections) {
+          if (conn.channelId === channelId && !conn.isApi && conn.ws && conn.ws.readyState === 1 && conn.chatId) {
+            found = conn;
+            break;
+          }
+        }
+        chatId = found?.chatId || senderId;
+      }
 
       if (!message) {
         writeJson(response, 400, { ok: false, error: 'message is required' });
@@ -1921,6 +1939,7 @@ server.on("request", async (request, response) => {
         messageId: replyMessageId,
         content: replyText,
         agentId: finalEvt?.data?.agentId || agentId || null,
+        chatId,
         timestamp: finalEvt?.data?.timestamp || Date.now(),
         meta: { source: 'api' },
       });
