@@ -851,6 +851,62 @@ async function handleThreadDelete(connectionId, channelId, data, senderId) {
   }
 }
 
+async function handleThreadMarkRead(connectionId, channelId, data, userId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  const client = clientConnections.get(connectionId);
+  if (!client) return;
+
+  if (!supabaseUrl || !supabaseKey) {
+    sendJson(client.ws, { type: 'thread.mark_read', data: { error: 'Database not configured' } });
+    return;
+  }
+
+  const threadId = normalizeThreadId(data?.threadId);
+  if (!threadId) {
+    sendJson(client.ws, { type: 'thread.mark_read', data: { error: 'threadId is required' } });
+    return;
+  }
+  if (!userId) {
+    sendJson(client.ws, { type: 'thread.mark_read', data: { error: 'userId is required' } });
+    return;
+  }
+
+  try {
+    // Upsert into cl_thread_read_status
+    const now = new Date().toISOString();
+    const upsertRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_thread_read_status`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+          'content-type': 'application/json',
+          prefer: 'return=minimal,resolution=merge-duplicates',
+        },
+        body: JSON.stringify({
+          user_id: userId,
+          thread_id: threadId,
+          last_read_at: now,
+        }),
+      }
+    );
+
+    if (!upsertRes.ok) {
+      const errText = await upsertRes.text();
+      console.error(`[threads] mark_read upsert failed: ${upsertRes.status} ${errText}`);
+      sendJson(client.ws, { type: 'thread.mark_read', data: { error: 'Failed to mark thread as read' } });
+      return;
+    }
+
+    sendJson(client.ws, { type: 'thread.mark_read', data: { threadId, lastReadAt: now } });
+  } catch (err) {
+    console.error(`[threads] mark_read error: ${err.message}`);
+    sendJson(client.ws, { type: 'thread.mark_read', data: { error: 'Internal error' } });
+  }
+}
+
 /** Map a Supabase cl_threads row to a camelCase Thread object */
 function mapThreadRow(row) {
   return {
@@ -1650,6 +1706,10 @@ clientWss.on("connection", (ws, request) => {
     }
     if (event?.type === 'thread.delete') {
       handleThreadDelete(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
+      return;
+    }
+    if (event?.type === 'thread.mark_read') {
+      handleThreadMarkRead(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
       return;
     }
 
