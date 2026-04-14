@@ -194,6 +194,14 @@ let relayConfig = {
   channels: {},
 };
 
+// ── Thread ID normalization ──
+// ACP threads use clawline-thread-{UUID} format; strip the prefix for cl_threads.id consistency.
+function normalizeThreadId(threadId) {
+  if (!threadId) return threadId;
+  const match = threadId.match(/^clawline-thread-(.+)$/);
+  return match ? match[1] : threadId;
+}
+
 // ── Message persistence (async, fire-and-forget) ──
 
 const MESSAGE_TYPES_TO_PERSIST = new Set([
@@ -209,7 +217,7 @@ function persistMessage(channelId, event, direction, senderId) {
   if (!MESSAGE_TYPES_TO_PERSIST.has(eventType)) return;
 
   const data = event.data || event;
-  const threadId = data.threadId || null;
+  const threadId = normalizeThreadId(data.threadId || null);
   const row = {
     channel_id: channelId,
     sender_id: senderId || data.senderId || null,
@@ -254,6 +262,7 @@ function persistMessage(channelId, event, direction, senderId) {
  * and broadcasts thread.updated + thread.new_reply events.
  */
 async function updateThreadOnNewReply(channelId, threadId, senderId, messageId, content) {
+  threadId = normalizeThreadId(threadId);
   const supabaseUrl = process.env.RELAY_SUPABASE_URL;
   const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
   if (!supabaseUrl || !supabaseKey) return;
@@ -421,7 +430,7 @@ async function handleThreadGet(connectionId, channelId, data, userId) {
     return;
   }
 
-  const threadId = data?.threadId;
+  const threadId = normalizeThreadId(data?.threadId);
   if (!threadId) {
     sendJson(client.ws, { type: 'thread.get', data: { error: 'threadId is required' } });
     return;
@@ -673,7 +682,7 @@ async function handleThreadUpdate(connectionId, channelId, data, senderId) {
     return;
   }
 
-  const threadId = data?.threadId;
+  const threadId = normalizeThreadId(data?.threadId);
   if (!threadId) {
     sendJson(client.ws, { type: 'thread.update', data: { error: 'threadId is required' } });
     return;
@@ -772,7 +781,7 @@ async function handleThreadDelete(connectionId, channelId, data, senderId) {
     return;
   }
 
-  const threadId = data?.threadId;
+  const threadId = normalizeThreadId(data?.threadId);
   if (!threadId) {
     sendJson(client.ws, { type: 'thread.delete', data: { error: 'threadId is required' } });
     return;
