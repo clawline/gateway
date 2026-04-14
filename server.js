@@ -1074,6 +1074,15 @@ backendWss.on("connection", (ws) => {
       clientConnections.delete(connectionId);
       closeSocket(client.ws, 1012, "backend disconnected");
     }
+    // Clean up API connection pool entries for this channel
+    if (global._apiConnPool) {
+      for (const [connId, entry] of global._apiConnPool.entries()) {
+        if (entry.channelId === boundChannelId) {
+          if (entry.idleTimer) clearTimeout(entry.idleTimer);
+          global._apiConnPool.delete(connId);
+        }
+      }
+    }
     console.log(`[relay] backend disconnected: ${boundChannelId}`);
   });
 
@@ -1770,9 +1779,24 @@ server.on("request", async (request, response) => {
       }
 
       const TIMEOUT_MS = 120_000; // 2 min
-      const virtualConnId = `api-${randomUUID()}`;
+      const POOL_IDLE_MS = 5 * 60_000; // 5 min keep-alive
+
+      // Stable virtualConnId derived from channel+chat so the same "conversation" reuses the same
+      // backend connection, preserving agent context across multiple API calls.
+      const virtualConnId = `api-${channelId}-${chatId}`;
       const messageId = `api-${Date.now()}-${randomUUID().slice(0, 8)}`;
       const ts = Date.now();
+
+      // Pool: reuse existing virtual connections instead of open/close every request.
+      if (!global._apiConnPool) global._apiConnPool = new Map();
+      const pool = global._apiConnPool;
+
+      // Clear any pending idle-close timer — we're actively using this connection
+      const existing = pool.get(virtualConnId);
+      if (existing?.idleTimer) {
+        clearTimeout(existing.idleTimer);
+        existing.idleTimer = null;
+      }
 
       // Build inbound event with source:"api" marker
       const inboundEvent = {
@@ -1813,8 +1837,7 @@ server.on("request", async (request, response) => {
       // Timeout guard
       const timer = setTimeout(() => rejectReply(new Error('timeout')), TIMEOUT_MS);
 
-      // Temporarily register a virtual client entry so relay.server.event can route here
-      const virtualWs = null; // no real WS — we intercept via apiCallbacks
+            // Register per-request callback so relay.server.event can route the reply here
       if (!global._apiCallbacks) global._apiCallbacks = new Map();
       global._apiCallbacks.set(virtualConnId, {
         onEvent(evt) {
@@ -1831,26 +1854,31 @@ server.on("request", async (request, response) => {
         },
       });
 
+      const isNewConn = !pool.has(virtualConnId);
+
       // Register virtual client in clientConnections so frame routing works
-      clientConnections.set(virtualConnId, {
-        ws: virtualWs,
-        channelId,
-        chatId,
-        userId: senderId,
-        isApi: true,
-      });
+      if (isNewConn) {
+        clientConnections.set(virtualConnId, {
+          ws: null,
+          channelId,
+          chatId,
+          userId: senderId,
+          isApi: true,
+        });
+        pool.set(virtualConnId, { channelId, chatId, agentId, idleTimer: null });
 
-      // Send open frame to backend
-      sendJson(backend.ws, {
-        type: 'relay.client.open',
-        connectionId: virtualConnId,
-        query: { chatId, agentId: agentId || null, token: null },
-        authUser: { senderId, chatId, allowAgents: agentId ? [agentId] : undefined },
-        timestamp: ts,
-      });
+        // Send open frame to backend (only once per stable connection)
+        sendJson(backend.ws, {
+          type: 'relay.client.open',
+          connectionId: virtualConnId,
+          query: { chatId, agentId: agentId || null, token: null },
+          authUser: { senderId, chatId, allowAgents: agentId ? [agentId] : undefined },
+          timestamp: ts,
+        });
 
-      // Small delay for backend to register the connection, then send message
-      await new Promise((r) => setTimeout(r, 50));
+        // Small delay for backend to register the connection, then send message
+        await new Promise((r) => setTimeout(r, 50));
+      }
 
       // Forward the inbound event to backend
       sendJson(backend.ws, {
@@ -1866,15 +1894,21 @@ server.on("request", async (request, response) => {
         replyEvts = await replyPromise;
       } finally {
         global._apiCallbacks.delete(virtualConnId);
-        clientConnections.delete(virtualConnId);
-        // Send close frame to backend
-        sendJson(backend.ws, {
-          type: 'relay.client.close',
-          connectionId: virtualConnId,
-          code: 1000,
-          reason: 'api done',
-          timestamp: Date.now(),
-        });
+        // Schedule idle close — don't close immediately so context is preserved for next call
+        const poolEntry = pool.get(virtualConnId);
+        if (poolEntry) {
+          poolEntry.idleTimer = setTimeout(() => {
+            pool.delete(virtualConnId);
+            clientConnections.delete(virtualConnId);
+            sendJson(backend.ws, {
+              type: 'relay.client.close',
+              connectionId: virtualConnId,
+              code: 1000,
+              reason: 'api idle timeout',
+              timestamp: Date.now(),
+            });
+          }, POOL_IDLE_MS);
+        }
       }
 
       // Extract final message.send event
