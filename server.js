@@ -196,6 +196,14 @@ let relayConfig = {
   channels: {},
 };
 
+// ── Thread ID normalization ──
+// ACP threads use clawline-thread-{UUID} format; strip the prefix for cl_threads.id consistency.
+function normalizeThreadId(threadId) {
+  if (!threadId) return threadId;
+  const match = threadId.match(/^clawline-thread-(.+)$/);
+  return match ? match[1] : threadId;
+}
+
 // ── Message persistence (sync with dead-letter fallback) ──
 
 const MESSAGE_TYPES_TO_PERSIST = new Set([
@@ -208,7 +216,7 @@ const DEAD_LETTER_PATH = join(baseDir, 'data', 'persist-failures.jsonl');
 
 function buildPersistRow(channelId, event, direction, senderId) {
   const data = event.data || event;
-  console.log(`[relay-persist] direction=${direction} threadId=${data.threadId || 'NULL'} keys=${Object.keys(data).join(',')}`);
+  const threadId = normalizeThreadId(data.threadId || null);
   return {
     channel_id: channelId,
     sender_id: senderId || data.senderId || null,
@@ -219,7 +227,7 @@ function buildPersistRow(channelId, event, direction, senderId) {
     direction,
     media_url: data.mediaUrl || null,
     parent_id: data.parentId || data.replyTo || null,
-    thread_id: data.threadId || null,
+    thread_id: threadId,
     meta: data.meta ? JSON.stringify(data.meta) : null,
     timestamp: data.timestamp || Date.now(),
   };
@@ -230,6 +238,7 @@ function buildPersistRow(channelId, event, direction, senderId) {
  * Retries inline up to PERSIST_MAX_RETRIES times.
  * On final failure, writes to dead-letter file on disk.
  * Returns true if persisted successfully, false otherwise.
+ * Also updates thread metadata when the message belongs to a thread.
  */
 async function persistMessageAsync(channelId, event, direction, senderId) {
   const supabaseUrl = process.env.RELAY_SUPABASE_URL;
@@ -254,6 +263,16 @@ async function persistMessageAsync(channelId, event, direction, senderId) {
         body: JSON.stringify(row),
       });
       if (res.ok || (res.status >= 200 && res.status < 300) || res.status === 409) {
+        // On successful persist, update thread metadata if applicable
+        if (row.thread_id) {
+          const data = event.data || event;
+          updateThreadOnNewReply(
+            channelId, row.thread_id,
+            senderId || data.senderId || null,
+            data.messageId || null,
+            data.content || data.text || null
+          );
+        }
         return true; // success or duplicate
       }
       if (res.status < 500) {
@@ -338,6 +357,978 @@ void loadRelaySettings().then((s) => {
     console.log(`[settings] loaded CORS origins from DB: ${s.corsAllowedOrigins.join(', ')}`);
   }
 }).catch(() => {});
+
+/**
+ * Update thread metadata when a new reply message is persisted.
+ * Increments reply_count, sets last_reply_at, appends sender to participant_ids,
+ * and broadcasts thread.updated + thread.new_reply events.
+ */
+async function updateThreadOnNewReply(channelId, threadId, senderId, messageId, content) {
+  threadId = normalizeThreadId(threadId);
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) return;
+
+  try {
+    // 1. Fetch current thread
+    const getRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}&limit=1`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+        },
+      }
+    );
+    const threads = await getRes.json();
+    if (!threads.length) return;
+    const thread = threads[0];
+
+    // Skip if thread is deleted
+    if (thread.status === 'deleted') return;
+
+    // 2. Build update payload
+    const now = new Date().toISOString();
+    const participantIds = Array.isArray(thread.participant_ids)
+      ? thread.participant_ids
+      : JSON.parse(thread.participant_ids || '[]');
+
+    if (senderId && !participantIds.includes(senderId)) {
+      participantIds.push(senderId);
+    }
+
+    const updateRow = {
+      reply_count: (thread.reply_count || 0) + 1,
+      last_reply_at: now,
+      participant_ids: JSON.stringify(participantIds),
+      updated_at: now,
+    };
+
+    // 3. Update the thread
+    const patchRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+          'content-type': 'application/json',
+          prefer: 'return=representation',
+        },
+        body: JSON.stringify(updateRow),
+      }
+    );
+    const updatedRows = await patchRes.json();
+    if (!updatedRows.length) return;
+    const updatedThread = updatedRows[0];
+
+    // 4. Broadcast thread.updated to all channel subscribers
+    broadcastToChannel(channelId, {
+      type: 'thread.updated',
+      data: { thread: mapThreadRow(updatedThread) },
+    });
+
+    // 5. Broadcast thread.new_reply to all channel subscribers
+    const preview = (content || '').substring(0, 100);
+    broadcastToChannel(channelId, {
+      type: 'thread.new_reply',
+      data: {
+        threadId,
+        messageId: messageId || null,
+        senderId: senderId || null,
+        preview,
+      },
+    });
+  } catch (err) {
+    console.warn(`[threads] metadata update failed for thread ${threadId}: ${err.message}`);
+  }
+}
+
+// ── Thread operations (Supabase CRUD) ──
+
+function broadcastToChannel(channelId, event, excludeConnectionId) {
+  for (const [connId, client] of clientConnections) {
+    if (client.channelId === channelId && connId !== excludeConnectionId && client.ws.readyState === WebSocket.OPEN) {
+      sendJson(client.ws, event);
+    }
+  }
+}
+
+async function handleThreadCreate(connectionId, channelId, data, senderId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  const client = clientConnections.get(connectionId);
+  if (!client) return;
+
+  if (!supabaseUrl || !supabaseKey) {
+    sendJson(client.ws, { type: 'thread.create', data: { error: 'Database not configured' } });
+    return;
+  }
+
+  const parentMessageId = data?.parentMessageId;
+  if (!parentMessageId) {
+    sendJson(client.ws, { type: 'thread.create', data: { error: 'parentMessageId is required' } });
+    return;
+  }
+
+  const threadId = randomUUID();
+  const now = new Date().toISOString();
+  const row = {
+    id: threadId,
+    channel_id: channelId,
+    parent_message_id: parentMessageId,
+    creator_id: senderId || 'unknown',
+    title: data.title || null,
+    status: 'active',
+    type: 'user',
+    created_at: now,
+    updated_at: now,
+    last_reply_at: null,
+    reply_count: 0,
+    participant_ids: JSON.stringify([senderId].filter(Boolean)),
+  };
+
+  try {
+    const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_threads`, {
+      method: 'POST',
+      headers: {
+        apikey: supabaseKey,
+        authorization: `Bearer ${supabaseKey}`,
+        'content-type': 'application/json',
+        prefer: 'return=representation',
+      },
+      body: JSON.stringify(row),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error(`[threads] create failed: ${res.status} ${errText}`);
+      sendJson(client.ws, { type: 'thread.create', data: { error: 'Failed to create thread' } });
+      return;
+    }
+
+    const [created] = await res.json();
+    const thread = mapThreadRow(created);
+
+    // Respond to requesting client
+    sendJson(client.ws, { type: 'thread.create', data: { requestId: data.requestId, thread } });
+
+    // Broadcast thread.updated to all channel subscribers
+    broadcastToChannel(channelId, { type: 'thread.updated', data: { thread } }, connectionId);
+  } catch (err) {
+    console.error(`[threads] create error: ${err.message}`);
+    sendJson(client.ws, { type: 'thread.create', data: { error: 'Internal error' } });
+  }
+}
+
+async function handleThreadGet(connectionId, channelId, data, userId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  const client = clientConnections.get(connectionId);
+  if (!client) return;
+
+  if (!supabaseUrl || !supabaseKey) {
+    sendJson(client.ws, { type: 'thread.get', data: { error: 'Database not configured' } });
+    return;
+  }
+
+  const threadId = normalizeThreadId(data?.threadId);
+  if (!threadId) {
+    sendJson(client.ws, { type: 'thread.get', data: { error: 'threadId is required' } });
+    return;
+  }
+
+  try {
+    // Fetch thread
+    const threadRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}&limit=1`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+        },
+      }
+    );
+
+    if (!threadRes.ok) {
+      sendJson(client.ws, { type: 'thread.get', data: { requestId: data.requestId, error: 'Failed to fetch thread' } });
+      return;
+    }
+
+    const threadRows = await threadRes.json();
+    if (!threadRows.length) {
+      sendJson(client.ws, { type: 'thread.get', data: { requestId: data.requestId, error: 'Thread not found' } });
+      return;
+    }
+
+    const threadRow = threadRows[0];
+    if (threadRow.status === 'deleted') {
+      sendJson(client.ws, { type: 'thread.get', data: { requestId: data.requestId, error: 'Thread not found' } });
+      return;
+    }
+
+    const thread = mapThreadRow(threadRow);
+
+    // Fetch last 20 messages in thread
+    const messagesRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_messages?thread_id=eq.${encodeURIComponent(threadId)}&order=timestamp.desc&limit=20`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+        },
+      }
+    );
+
+    let messages = [];
+    if (messagesRes.ok) {
+      const msgRows = await messagesRes.json();
+      messages = msgRows.reverse().map(mapMessageRow);
+    }
+
+    // Compute unread count
+    let unreadCount = 0;
+    if (userId) {
+      const readRes = await fetch(
+        `${supabaseUrl}/pg/rest/v1/cl_thread_read_status?user_id=eq.${encodeURIComponent(userId)}&thread_id=eq.${encodeURIComponent(threadId)}&limit=1`,
+        {
+          headers: {
+            apikey: supabaseKey,
+            authorization: `Bearer ${supabaseKey}`,
+          },
+        }
+      );
+
+      if (readRes.ok) {
+        const readRows = await readRes.json();
+        if (readRows.length && readRows[0].last_read_at) {
+          // Count messages created after the user's last read timestamp
+          const lastReadAt = readRows[0].last_read_at;
+          const countRes = await fetch(
+            `${supabaseUrl}/pg/rest/v1/cl_messages?thread_id=eq.${encodeURIComponent(threadId)}&created_at=gt.${encodeURIComponent(lastReadAt)}&select=message_id`,
+            {
+              headers: {
+                apikey: supabaseKey,
+                authorization: `Bearer ${supabaseKey}`,
+                prefer: 'count=exact',
+              },
+            }
+          );
+          if (countRes.ok) {
+            const contentRange = countRes.headers.get('content-range');
+            if (contentRange) {
+              const match = contentRange.match(/\/(\d+)/);
+              if (match) unreadCount = parseInt(match[1], 10);
+            }
+          }
+        } else {
+          // No read status — all replies are unread
+          unreadCount = thread.replyCount;
+        }
+      } else {
+        unreadCount = thread.replyCount;
+      }
+    }
+
+    sendJson(client.ws, {
+      type: 'thread.get',
+      data: {
+        requestId: data.requestId,
+        thread,
+        messages,
+        unreadCount,
+      },
+    });
+  } catch (err) {
+    console.error(`[threads] get error: ${err.message}`);
+    sendJson(client.ws, { type: 'thread.get', data: { requestId: data.requestId, error: 'Internal error' } });
+  }
+}
+
+async function handleThreadList(connectionId, channelId, data, userId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  const client = clientConnections.get(connectionId);
+  if (!client) return;
+
+  if (!supabaseUrl || !supabaseKey) {
+    sendJson(client.ws, { type: 'thread.list', data: { error: 'Database not configured' } });
+    return;
+  }
+
+  const filterChannelId = data?.channelId || channelId;
+  const status = data?.status || 'active';
+  const participantId = data?.participantId || null;
+  const page = Math.max(1, parseInt(data?.page, 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(data?.pageSize, 10) || 20));
+  const offset = (page - 1) * pageSize;
+
+  try {
+    // Build query filters
+    let queryFilters = `channel_id=eq.${encodeURIComponent(filterChannelId)}`;
+
+    // Status filter: 'all' returns everything except deleted, specific status matches exactly
+    if (status === 'all') {
+      queryFilters += `&status=neq.deleted`;
+    } else {
+      queryFilters += `&status=eq.${encodeURIComponent(status)}`;
+    }
+
+    // Participant filter: check if participantId is in the participant_ids jsonb array
+    if (participantId) {
+      queryFilters += `&participant_ids=cs.${encodeURIComponent(JSON.stringify([participantId]))}`;
+    }
+
+    // Fetch threads with count
+    const threadsRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?${queryFilters}&order=last_reply_at.desc.nullslast,created_at.desc&offset=${offset}&limit=${pageSize}`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+          prefer: 'count=exact',
+        },
+      }
+    );
+
+    if (!threadsRes.ok) {
+      const errText = await threadsRes.text();
+      console.error(`[threads] list failed: ${threadsRes.status} ${errText}`);
+      sendJson(client.ws, { type: 'thread.list', data: { requestId: data.requestId, error: 'Failed to list threads' } });
+      return;
+    }
+
+    // Parse total count from content-range header
+    let total = 0;
+    const contentRange = threadsRes.headers.get('content-range');
+    if (contentRange) {
+      const match = contentRange.match(/\/(\d+)/);
+      if (match) total = parseInt(match[1], 10);
+    }
+
+    const threadRows = await threadsRes.json();
+    const threads = threadRows.map(mapThreadRow);
+
+    // Compute unread count for each thread if we have a userId
+    const threadsWithUnread = await Promise.all(
+      threads.map(async (thread) => {
+        let unreadCount = 0;
+        if (userId && thread.replyCount > 0) {
+          try {
+            const readRes = await fetch(
+              `${supabaseUrl}/pg/rest/v1/cl_thread_read_status?user_id=eq.${encodeURIComponent(userId)}&thread_id=eq.${encodeURIComponent(thread.id)}&limit=1`,
+              {
+                headers: {
+                  apikey: supabaseKey,
+                  authorization: `Bearer ${supabaseKey}`,
+                },
+              }
+            );
+            if (readRes.ok) {
+              const readRows = await readRes.json();
+              if (readRows.length && readRows[0].last_read_at) {
+                const lastReadAt = readRows[0].last_read_at;
+                const countRes = await fetch(
+                  `${supabaseUrl}/pg/rest/v1/cl_messages?thread_id=eq.${encodeURIComponent(thread.id)}&created_at=gt.${encodeURIComponent(lastReadAt)}&select=message_id`,
+                  {
+                    headers: {
+                      apikey: supabaseKey,
+                      authorization: `Bearer ${supabaseKey}`,
+                      prefer: 'count=exact',
+                    },
+                  }
+                );
+                if (countRes.ok) {
+                  const cr = countRes.headers.get('content-range');
+                  if (cr) {
+                    const m = cr.match(/\/(\d+)/);
+                    if (m) unreadCount = parseInt(m[1], 10);
+                  }
+                }
+              } else {
+                unreadCount = thread.replyCount;
+              }
+            } else {
+              unreadCount = thread.replyCount;
+            }
+          } catch {
+            unreadCount = thread.replyCount;
+          }
+        }
+        return { ...thread, unreadCount };
+      })
+    );
+
+    sendJson(client.ws, {
+      type: 'thread.list',
+      data: {
+        requestId: data.requestId,
+        threads: threadsWithUnread,
+        total,
+      },
+    });
+  } catch (err) {
+    console.error(`[threads] list error: ${err.message}`);
+    sendJson(client.ws, { type: 'thread.list', data: { requestId: data.requestId, error: 'Internal error' } });
+  }
+}
+
+async function handleThreadUpdate(connectionId, channelId, data, senderId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  const client = clientConnections.get(connectionId);
+  if (!client) return;
+
+  if (!supabaseUrl || !supabaseKey) {
+    sendJson(client.ws, { type: 'thread.update', data: { error: 'Database not configured' } });
+    return;
+  }
+
+  const threadId = normalizeThreadId(data?.threadId);
+  if (!threadId) {
+    sendJson(client.ws, { type: 'thread.update', data: { error: 'threadId is required' } });
+    return;
+  }
+
+  try {
+    // Fetch current thread to validate status transition
+    const getRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}&limit=1`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+        },
+      }
+    );
+
+    if (!getRes.ok) {
+      sendJson(client.ws, { type: 'thread.update', data: { requestId: data.requestId, error: 'Failed to fetch thread' } });
+      return;
+    }
+
+    const rows = await getRes.json();
+    if (!rows.length || rows[0].status === 'deleted') {
+      sendJson(client.ws, { type: 'thread.update', data: { requestId: data.requestId, error: 'Thread not found' } });
+      return;
+    }
+
+    const currentStatus = rows[0].status;
+
+    // Validate status transition if status change requested
+    if (data.status && data.status !== currentStatus) {
+      const allowedTransitions = {
+        active: ['archived', 'locked'],
+        archived: ['active'],
+        locked: ['active'],
+      };
+      const allowed = allowedTransitions[currentStatus] || [];
+      if (!allowed.includes(data.status)) {
+        sendJson(client.ws, {
+          type: 'thread.update',
+          data: { requestId: data.requestId, error: `Cannot transition from '${currentStatus}' to '${data.status}'` },
+        });
+        return;
+      }
+    }
+
+    // Build patch object
+    const patch = { updated_at: new Date().toISOString() };
+    if (data.title !== undefined) patch.title = data.title;
+    if (data.status) patch.status = data.status;
+
+    const updateRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+          'content-type': 'application/json',
+          prefer: 'return=representation',
+        },
+        body: JSON.stringify(patch),
+      }
+    );
+
+    if (!updateRes.ok) {
+      const errText = await updateRes.text();
+      console.error(`[threads] update failed: ${updateRes.status} ${errText}`);
+      sendJson(client.ws, { type: 'thread.update', data: { requestId: data.requestId, error: 'Failed to update thread' } });
+      return;
+    }
+
+    const [updated] = await updateRes.json();
+    const thread = mapThreadRow(updated);
+
+    // Respond to requesting client
+    sendJson(client.ws, { type: 'thread.update', data: { requestId: data.requestId, thread } });
+
+    // Broadcast thread.updated to all channel subscribers
+    broadcastToChannel(channelId, { type: 'thread.updated', data: { thread } }, connectionId);
+  } catch (err) {
+    console.error(`[threads] update error: ${err.message}`);
+    sendJson(client.ws, { type: 'thread.update', data: { requestId: data.requestId, error: 'Internal error' } });
+  }
+}
+
+async function handleThreadDelete(connectionId, channelId, data, senderId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  const client = clientConnections.get(connectionId);
+  if (!client) return;
+
+  if (!supabaseUrl || !supabaseKey) {
+    sendJson(client.ws, { type: 'thread.delete', data: { error: 'Database not configured' } });
+    return;
+  }
+
+  const threadId = normalizeThreadId(data?.threadId);
+  if (!threadId) {
+    sendJson(client.ws, { type: 'thread.delete', data: { error: 'threadId is required' } });
+    return;
+  }
+
+  try {
+    // Fetch current thread to verify it exists
+    const getRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}&limit=1`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+        },
+      }
+    );
+
+    if (!getRes.ok) {
+      sendJson(client.ws, { type: 'thread.delete', data: { requestId: data.requestId, error: 'Failed to fetch thread' } });
+      return;
+    }
+
+    const rows = await getRes.json();
+    if (!rows.length || rows[0].status === 'deleted') {
+      sendJson(client.ws, { type: 'thread.delete', data: { requestId: data.requestId, error: 'Thread not found' } });
+      return;
+    }
+
+    // Soft-delete: set status to 'deleted'
+    const patch = {
+      status: 'deleted',
+      updated_at: new Date().toISOString(),
+    };
+
+    const updateRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+          'content-type': 'application/json',
+          prefer: 'return=representation',
+        },
+        body: JSON.stringify(patch),
+      }
+    );
+
+    if (!updateRes.ok) {
+      const errText = await updateRes.text();
+      console.error(`[threads] delete failed: ${updateRes.status} ${errText}`);
+      sendJson(client.ws, { type: 'thread.delete', data: { requestId: data.requestId, error: 'Failed to delete thread' } });
+      return;
+    }
+
+    const [deleted] = await updateRes.json();
+    const thread = mapThreadRow(deleted);
+
+    // Respond to requesting client
+    sendJson(client.ws, { type: 'thread.delete', data: { requestId: data.requestId, thread } });
+
+    // Broadcast thread.updated to all channel subscribers
+    broadcastToChannel(channelId, { type: 'thread.updated', data: { thread } }, connectionId);
+  } catch (err) {
+    console.error(`[threads] delete error: ${err.message}`);
+    sendJson(client.ws, { type: 'thread.delete', data: { requestId: data.requestId, error: 'Internal error' } });
+  }
+}
+
+async function handleThreadMarkRead(connectionId, channelId, data, userId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  const client = clientConnections.get(connectionId);
+  if (!client) return;
+
+  if (!supabaseUrl || !supabaseKey) {
+    sendJson(client.ws, { type: 'thread.mark_read', data: { error: 'Database not configured' } });
+    return;
+  }
+
+  const threadId = normalizeThreadId(data?.threadId);
+  if (!threadId) {
+    sendJson(client.ws, { type: 'thread.mark_read', data: { error: 'threadId is required' } });
+    return;
+  }
+  if (!userId) {
+    sendJson(client.ws, { type: 'thread.mark_read', data: { error: 'userId is required' } });
+    return;
+  }
+
+  try {
+    // Upsert into cl_thread_read_status
+    const now = new Date().toISOString();
+    const upsertRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_thread_read_status`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+          'content-type': 'application/json',
+          prefer: 'return=minimal,resolution=merge-duplicates',
+        },
+        body: JSON.stringify({
+          user_id: userId,
+          thread_id: threadId,
+          last_read_at: now,
+        }),
+      }
+    );
+
+    if (!upsertRes.ok) {
+      const errText = await upsertRes.text();
+      console.error(`[threads] mark_read upsert failed: ${upsertRes.status} ${errText}`);
+      sendJson(client.ws, { type: 'thread.mark_read', data: { error: 'Failed to mark thread as read' } });
+      return;
+    }
+
+    sendJson(client.ws, { type: 'thread.mark_read', data: { threadId, lastReadAt: now } });
+  } catch (err) {
+    console.error(`[threads] mark_read error: ${err.message}`);
+    sendJson(client.ws, { type: 'thread.mark_read', data: { error: 'Internal error' } });
+  }
+}
+
+/**
+ * Handle thread.search — search messages within a thread by text content.
+ * Uses PostgREST ilike for case-insensitive substring matching on cl_messages.content.
+ */
+async function handleThreadSearch(connectionId, channelId, data, userId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  const client = clientConnections.get(connectionId);
+  if (!client) return;
+
+  if (!supabaseUrl || !supabaseKey) {
+    sendJson(client.ws, { type: 'thread.search', data: { error: 'Database not configured' } });
+    return;
+  }
+
+  const threadId = normalizeThreadId(data?.threadId);
+  if (!threadId) {
+    sendJson(client.ws, { type: 'thread.search', data: { requestId: data?.requestId, error: 'threadId is required' } });
+    return;
+  }
+  const query = (data?.query || '').trim();
+  if (!query) {
+    sendJson(client.ws, { type: 'thread.search', data: { requestId: data?.requestId, error: 'query is required' } });
+    return;
+  }
+
+  try {
+    // Search messages in this thread using ilike (case-insensitive substring match)
+    const encodedQuery = encodeURIComponent(`*${query}*`);
+    const searchRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_messages?thread_id=eq.${encodeURIComponent(threadId)}&content=ilike.${encodedQuery}&order=timestamp.asc&limit=50`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+          prefer: 'count=exact',
+        },
+      }
+    );
+
+    if (!searchRes.ok) {
+      const errText = await searchRes.text();
+      console.error(`[threads] search failed: ${searchRes.status} ${errText}`);
+      sendJson(client.ws, { type: 'thread.search', data: { requestId: data.requestId, error: 'Search failed' } });
+      return;
+    }
+
+    const msgRows = await searchRes.json();
+    const total = (() => {
+      const contentRange = searchRes.headers.get('content-range');
+      if (contentRange) {
+        const match = contentRange.match(/\/(\d+)/);
+        if (match) return parseInt(match[1], 10);
+      }
+      return msgRows.length;
+    })();
+
+    const messages = msgRows.map(mapMessageRow);
+
+    sendJson(client.ws, {
+      type: 'thread.search',
+      data: {
+        requestId: data.requestId,
+        query,
+        threadId,
+        messages,
+        total,
+      },
+    });
+  } catch (err) {
+    console.error(`[threads] search error: ${err.message}`);
+    sendJson(client.ws, { type: 'thread.search', data: { requestId: data.requestId, error: 'Internal error' } });
+  }
+}
+
+/** Map a Supabase cl_threads row to a camelCase Thread object */
+function mapThreadRow(row) {
+  return {
+    id: row.id,
+    channelId: row.channel_id,
+    parentMessageId: row.parent_message_id,
+    creatorId: row.creator_id,
+    title: row.title || null,
+    status: row.status,
+    type: row.type,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastReplyAt: row.last_reply_at || null,
+    replyCount: row.reply_count ?? 0,
+    participantIds: Array.isArray(row.participant_ids) ? row.participant_ids : JSON.parse(row.participant_ids || '[]'),
+  };
+}
+
+/** Map a Supabase cl_messages row to a camelCase message object */
+function mapMessageRow(row) {
+  return {
+    messageId: row.message_id,
+    chatId: row.channel_id,
+    senderId: row.sender_id,
+    agentId: row.agent_id,
+    content: row.content,
+    contentType: row.content_type,
+    direction: row.direction,
+    mediaUrl: row.media_url,
+    parentId: row.parent_id,
+    threadId: row.thread_id,
+    meta: row.meta,
+    timestamp: row.timestamp,
+    createdAt: row.created_at,
+  };
+}
+
+// ── Auto-thread creation engine ──
+
+/** Cache of known thread IDs to avoid redundant DB lookups */
+const knownThreadIds = new Set();
+
+/**
+ * Pending auto-threads: when an auto-thread is created for a user message,
+ * the AI response should be routed into the thread.
+ * Map<connectionId, Array<{ threadId, parentMessageId, createdAt }>>
+ * Uses a queue per connection so rapid @mentions don't overwrite each other.
+ * Only the front entry (oldest) is active for routing; it's removed on message.send/stream.end.
+ * Entries auto-expire after 120 seconds.
+ */
+const pendingAutoThreads = new Map();
+
+function pendingPush(connectionId, threadId, parentMessageId, source = 'auto') {
+  if (!pendingAutoThreads.has(connectionId)) pendingAutoThreads.set(connectionId, []);
+  const queue = pendingAutoThreads.get(connectionId);
+  if (queue.length >= 10) {
+    console.warn(`[auto-thread] queue overflow for ${connectionId}, dropping oldest entry`);
+    queue.shift(); // cap queue size
+  }
+  const entry = { threadId, parentMessageId, createdAt: Date.now(), source };
+  queue.push(entry);
+  setTimeout(() => {
+    const q = pendingAutoThreads.get(connectionId);
+    if (!q) return;
+    const idx = q.indexOf(entry); // reference equality
+    if (idx !== -1) q.splice(idx, 1);
+    if (q.length === 0) pendingAutoThreads.delete(connectionId);
+  }, 120_000);
+}
+
+function pendingPeek(connectionId) {
+  const q = pendingAutoThreads.get(connectionId);
+  return q && q.length > 0 ? q[0] : null;
+}
+
+function pendingShift(connectionId) {
+  const q = pendingAutoThreads.get(connectionId);
+  if (!q || q.length === 0) return null;
+  const entry = q.shift();
+  if (q.length === 0) pendingAutoThreads.delete(connectionId);
+  return entry;
+}
+
+function pendingClear(connectionId) {
+  pendingAutoThreads.delete(connectionId);
+}
+
+// Track recently-shifted thread IDs per connection to handle backends that send
+// both stream.end and message.send for the same response (prevents double-shift).
+const recentlyShifted = new Map(); // Map<connectionId, { threadId, ts }>
+
+function markShifted(connectionId, threadId) {
+  recentlyShifted.set(connectionId, { threadId, ts: Date.now() });
+  setTimeout(() => {
+    const entry = recentlyShifted.get(connectionId);
+    if (entry && entry.threadId === threadId) recentlyShifted.delete(connectionId);
+  }, 5_000);
+}
+
+function getRecentlyShifted(connectionId) {
+  const entry = recentlyShifted.get(connectionId);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > 5_000) { recentlyShifted.delete(connectionId); return null; }
+  return entry.threadId;
+}
+
+/**
+ * Create a thread programmatically (no client connection required).
+ * Used by auto-thread triggers (delegation, ACP, @mention).
+ * If connectionId is provided, registers a pending auto-thread so the next AI response
+ * for that connection is routed into the thread.
+ * Returns { threadId, thread } or null on failure.
+ */
+async function autoCreateThread(channelId, parentMessageId, creatorId, type, title, connectionId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) return null;
+
+  const threadId = randomUUID();
+  const now = new Date().toISOString();
+  const row = {
+    id: threadId,
+    channel_id: channelId,
+    parent_message_id: parentMessageId,
+    creator_id: creatorId || 'system',
+    title: title || null,
+    status: 'active',
+    type: type === 'acp' ? 'acp' : 'user', // DB constraint only allows 'user' | 'acp'
+    created_at: now,
+    updated_at: now,
+    last_reply_at: null,
+    reply_count: 0,
+    participant_ids: JSON.stringify([creatorId].filter(Boolean)),
+  };
+
+  try {
+    const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_threads`, {
+      method: 'POST',
+      headers: {
+        apikey: supabaseKey,
+        authorization: `Bearer ${supabaseKey}`,
+        'content-type': 'application/json',
+        prefer: 'return=representation',
+      },
+      body: JSON.stringify(row),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn(`[auto-thread] create failed: ${res.status} ${errText}`);
+      return null;
+    }
+
+    const [created] = await res.json();
+    const thread = mapThreadRow(created);
+    knownThreadIds.add(threadId);
+    console.log(`[auto-thread] created ${type} thread ${threadId} for message ${parentMessageId}`);
+
+    // Broadcast to all channel clients
+    broadcastToChannel(channelId, { type: 'thread.updated', data: { thread } });
+
+    // Register pending auto-thread so AI response is routed into this thread
+    if (connectionId) {
+      pendingPush(connectionId, threadId, parentMessageId);
+    }
+
+    return { threadId, thread };
+  } catch (err) {
+    console.warn(`[auto-thread] create error: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Fetch a single thread from Supabase by ID.
+ * Used to discover ACP-created threads that gateway didn't create.
+ */
+async function fetchThreadFromDb(channelId, threadId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) return null;
+
+  try {
+    const res = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}&channel_id=eq.${encodeURIComponent(channelId)}&limit=1`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+        },
+      }
+    );
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return rows.length ? rows[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Track the last user message ID per connection.
+ * Used to fix ACP threads that have chatId as parentMessageId instead of the actual message ID.
+ */
+const lastUserMessageId = new Map();
+
+/**
+ * Ensure a thread ID (possibly from ACP) is known to clients.
+ * If the thread exists in DB but not in our cache, broadcast it.
+ * Fixes ACP threads whose parentMessageId is a chatId instead of a real message ID.
+ */
+async function ensureThreadKnown(channelId, threadId, connectionId) {
+  if (!threadId || knownThreadIds.has(threadId)) return;
+  knownThreadIds.add(threadId); // mark early to avoid duplicate fetches
+
+  const row = await fetchThreadFromDb(channelId, threadId);
+  if (row) {
+    // Fix ACP threads with non-message parentMessageId (e.g., chatId "Levis" instead of "msg-xxx")
+    const pmid = row.parent_message_id;
+    if (pmid && !pmid.startsWith('msg-') && !pmid.startsWith('delegate-') && !pmid.startsWith('mention-')) {
+      const realMsgId = connectionId ? lastUserMessageId.get(connectionId) : null;
+      if (realMsgId) {
+        row.parent_message_id = realMsgId;
+        // Update in DB
+        const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+        const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+        if (supabaseUrl && supabaseKey) {
+          fetch(`${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}`, {
+            method: 'PATCH',
+            headers: {
+              apikey: supabaseKey,
+              authorization: `Bearer ${supabaseKey}`,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({ parent_message_id: realMsgId }),
+          }).catch(() => {});
+        }
+        console.log(`[auto-thread] fixed ACP thread ${threadId} parentMessageId: "${pmid}" → "${realMsgId}"`);
+      }
+    }
+
+    broadcastToChannel(channelId, { type: 'thread.updated', data: { thread: mapThreadRow(row) } });
+    console.log(`[auto-thread] discovered ACP thread ${threadId}, broadcast to clients`);
+  }
+}
 
 // ── AI Settings & LLM helpers ──
 
@@ -1012,6 +2003,59 @@ backendWss.on("connection", (ws) => {
         return;
       }
 
+      // ── Auto-thread triggers (backend → client) ──
+      const evt = frame.event;
+      const evtData = evt?.data || {};
+      let isAutoThreadParent = false; // flag: this message just became a thread parent
+
+      if (evt?.type === 'message.send' && !evtData.threadId) {
+        const msgId = evtData.messageId || '';
+
+        // Trigger 1: Subagent delegation — channel sets messageId starting with "delegate-"
+        // Create thread with delegate echo as parent — do NOT set threadId on the message,
+        // because parent messages must stay visible in the main chat.
+        if (msgId.startsWith('delegate-') && evtData.agentId) {
+          await autoCreateThread(
+            boundChannelId, msgId, evtData.senderId || evtData.agentId,
+            'auto', `Delegation → ${evtData.agentId}`, frame.connectionId
+          );
+          isAutoThreadParent = true;
+        }
+      }
+
+      // Trigger 2: ACP thread discovery — message carries threadId from ACP session
+      if (evtData.threadId) {
+        const normalized = normalizeThreadId(evtData.threadId);
+        if (normalized) {
+          ensureThreadKnown(boundChannelId, normalized, frame.connectionId);
+        }
+      }
+
+      // Trigger 3: Route AI response into pending auto-thread
+      // When an auto-thread was created (e.g., @mention), the AI's response should go into the thread.
+      // Skip if this message is itself the thread parent (isAutoThreadParent).
+      if (!evtData.threadId && !isAutoThreadParent) {
+        const pending = pendingPeek(frame.connectionId);
+        const recentThreadId = getRecentlyShifted(frame.connectionId);
+        const evtType = evt?.type || '';
+        const isStreamEvent = evtType === 'message.send' || evtType === 'thinking.start' || evtType === 'thinking.end' ||
+            evtType === 'thinking.update' || evtType === 'text.delta' || evtType === 'stream.end';
+
+        if (pending && isStreamEvent) {
+          evtData.threadId = pending.threadId;
+          if (evtType === 'message.send' || evtType === 'stream.end') {
+            pendingShift(frame.connectionId);
+            markShifted(frame.connectionId, pending.threadId);
+            console.log(`[auto-thread] routed AI response into thread ${pending.threadId}`);
+          }
+        } else if (!pending && recentThreadId && isStreamEvent) {
+          // Backend sent both stream.end and message.send for the same response;
+          // stream.end already shifted the entry, route this event into the same thread.
+          evtData.threadId = recentThreadId;
+        }
+      }
+      // ── End auto-thread triggers ──
+
       await persistMessageAsync(boundChannelId, frame.event, 'outbound', client.userId);
       sendJson(client.ws, frame.event);
 
@@ -1161,7 +2205,81 @@ clientWss.on("connection", (ws, request) => {
       return;
     }
 
+    // Handle thread events directly in gateway (requires Supabase access)
+    if (event?.type === 'thread.create') {
+      handleThreadCreate(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
+      return;
+    }
+    if (event?.type === 'thread.get') {
+      handleThreadGet(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
+      return;
+    }
+    if (event?.type === 'thread.list') {
+      handleThreadList(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
+      return;
+    }
+    if (event?.type === 'thread.update') {
+      handleThreadUpdate(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
+      return;
+    }
+    if (event?.type === 'thread.delete') {
+      handleThreadDelete(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
+      return;
+    }
+    if (event?.type === 'thread.mark_read') {
+      handleThreadMarkRead(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
+      return;
+    }
+    if (event?.type === 'thread.search') {
+      handleThreadSearch(connectionId, channelId, event.data || {}, authResult.authUser?.senderId);
+      return;
+    }
+
     console.log(`[relay] → forwarding client event to backend ${channelId}: ${event?.type || 'unknown'}`);
+
+    // Track last user message ID per connection (used to fix ACP thread parentMessageId)
+    if (event?.type === 'message.receive' && event.data?.messageId) {
+      lastUserMessageId.set(connectionId, event.data.messageId);
+    }
+
+    // ── Thread reply routing: when user sends a message inside a thread,
+    // remember the threadId so the AI response gets routed back into the same thread.
+    // When user sends a message WITHOUT threadId, clear only reply-sourced pending entries
+    // (keep auto-thread entries like @mention which haven't been consumed yet).
+    if (event?.type === 'message.receive') {
+      if (event.data?.threadId) {
+        pendingPush(connectionId, event.data.threadId, event.data.messageId || 'unknown', 'reply');
+        console.log(`[auto-thread] tracking thread reply, will route AI response to thread ${event.data.threadId}`);
+      } else {
+        // User sent a main-chat message — clear reply-sourced entries only
+        const q = pendingAutoThreads.get(connectionId);
+        if (q) {
+          const filtered = q.filter(e => e.source !== 'reply');
+          if (filtered.length === 0) pendingAutoThreads.delete(connectionId);
+          else pendingAutoThreads.set(connectionId, filtered);
+        }
+      }
+    }
+
+    // ── Auto-thread trigger: @mention detection (client → backend) ──
+    if (event?.type === 'message.receive' && !event.data?.threadId) {
+      const content = event.data?.content || event.data?.text || '';
+      // Match @word at start of string or after whitespace — excludes emails (user@domain)
+      const mentionMatch = content.match(/(^|\s)@(\w+)/);
+      if (mentionMatch) {
+        const mentionedName = mentionMatch[2];
+        const msgId = event.data?.messageId || `mention-${randomUUID()}`;
+        if (!event.data.messageId) event.data.messageId = msgId;
+        // Create thread with this message as parent — do NOT set threadId on the message itself,
+        // because parent messages must stay in the main chat (no threadId).
+        await autoCreateThread(
+          channelId, msgId, authResult.authUser?.senderId,
+          'mention', `@${mentionedName}`, connectionId
+        );
+      }
+    }
+    // ── End @mention trigger ──
+
     await persistMessageAsync(channelId, event, 'inbound', authResult.authUser?.senderId);
 
     // Broadcast inbound message to sibling connections (so client B sees what client A sent)
@@ -1183,6 +2301,9 @@ clientWss.on("connection", (ws, request) => {
 
   ws.on("close", (code, reason) => {
     clientConnections.delete(connectionId);
+    pendingClear(connectionId);
+    lastUserMessageId.delete(connectionId);
+    recentlyShifted.delete(connectionId);
     const currentBackend = backends.get(channelId);
     if (!currentBackend || currentBackend.ws.readyState !== WebSocket.OPEN) {
       return;
@@ -1692,6 +2813,8 @@ server.on("request", async (request, response) => {
       }
 
       // Build PostgREST query
+      // When 'before' is provided, fetch newest messages before that timestamp (desc order).
+      // When 'after' is provided, fetch oldest messages after that timestamp (asc order).
       const isPagingBack = before > 0 && !after;
       let filter = `select=id,channel_id,sender_id,agent_id,message_id,content,content_type,direction,media_url,thread_id,meta,timestamp`;
       filter += `&order=timestamp.${isPagingBack ? 'desc' : 'asc'}&limit=${limit}`;
