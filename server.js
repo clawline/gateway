@@ -1019,6 +1019,215 @@ function mapMessageRow(row) {
   };
 }
 
+// ── Auto-thread creation engine ──
+
+/** Cache of known thread IDs to avoid redundant DB lookups */
+const knownThreadIds = new Set();
+
+/**
+ * Pending auto-threads: when an auto-thread is created for a user message,
+ * the AI response should be routed into the thread.
+ * Map<connectionId, Array<{ threadId, parentMessageId, createdAt }>>
+ * Uses a queue per connection so rapid @mentions don't overwrite each other.
+ * Only the front entry (oldest) is active for routing; it's removed on message.send/stream.end.
+ * Entries auto-expire after 120 seconds.
+ */
+const pendingAutoThreads = new Map();
+
+function pendingPush(connectionId, threadId, parentMessageId, source = 'auto') {
+  if (!pendingAutoThreads.has(connectionId)) pendingAutoThreads.set(connectionId, []);
+  const queue = pendingAutoThreads.get(connectionId);
+  if (queue.length >= 10) {
+    console.warn(`[auto-thread] queue overflow for ${connectionId}, dropping oldest entry`);
+    queue.shift(); // cap queue size
+  }
+  const entry = { threadId, parentMessageId, createdAt: Date.now(), source };
+  queue.push(entry);
+  setTimeout(() => {
+    const q = pendingAutoThreads.get(connectionId);
+    if (!q) return;
+    const idx = q.indexOf(entry); // reference equality
+    if (idx !== -1) q.splice(idx, 1);
+    if (q.length === 0) pendingAutoThreads.delete(connectionId);
+  }, 120_000);
+}
+
+function pendingPeek(connectionId) {
+  const q = pendingAutoThreads.get(connectionId);
+  return q && q.length > 0 ? q[0] : null;
+}
+
+function pendingShift(connectionId) {
+  const q = pendingAutoThreads.get(connectionId);
+  if (!q || q.length === 0) return null;
+  const entry = q.shift();
+  if (q.length === 0) pendingAutoThreads.delete(connectionId);
+  return entry;
+}
+
+function pendingClear(connectionId) {
+  pendingAutoThreads.delete(connectionId);
+}
+
+// Track recently-shifted thread IDs per connection to handle backends that send
+// both stream.end and message.send for the same response (prevents double-shift).
+const recentlyShifted = new Map(); // Map<connectionId, { threadId, ts }>
+
+function markShifted(connectionId, threadId) {
+  recentlyShifted.set(connectionId, { threadId, ts: Date.now() });
+  setTimeout(() => {
+    const entry = recentlyShifted.get(connectionId);
+    if (entry && entry.threadId === threadId) recentlyShifted.delete(connectionId);
+  }, 5_000);
+}
+
+function getRecentlyShifted(connectionId) {
+  const entry = recentlyShifted.get(connectionId);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > 5_000) { recentlyShifted.delete(connectionId); return null; }
+  return entry.threadId;
+}
+
+/**
+ * Create a thread programmatically (no client connection required).
+ * Used by auto-thread triggers (delegation, ACP, @mention).
+ * If connectionId is provided, registers a pending auto-thread so the next AI response
+ * for that connection is routed into the thread.
+ * Returns { threadId, thread } or null on failure.
+ */
+async function autoCreateThread(channelId, parentMessageId, creatorId, type, title, connectionId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) return null;
+
+  const threadId = randomUUID();
+  const now = new Date().toISOString();
+  const row = {
+    id: threadId,
+    channel_id: channelId,
+    parent_message_id: parentMessageId,
+    creator_id: creatorId || 'system',
+    title: title || null,
+    status: 'active',
+    type: type === 'acp' ? 'acp' : 'user', // DB constraint only allows 'user' | 'acp'
+    created_at: now,
+    updated_at: now,
+    last_reply_at: null,
+    reply_count: 0,
+    participant_ids: JSON.stringify([creatorId].filter(Boolean)),
+  };
+
+  try {
+    const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_threads`, {
+      method: 'POST',
+      headers: {
+        apikey: supabaseKey,
+        authorization: `Bearer ${supabaseKey}`,
+        'content-type': 'application/json',
+        prefer: 'return=representation',
+      },
+      body: JSON.stringify(row),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn(`[auto-thread] create failed: ${res.status} ${errText}`);
+      return null;
+    }
+
+    const [created] = await res.json();
+    const thread = mapThreadRow(created);
+    knownThreadIds.add(threadId);
+    console.log(`[auto-thread] created ${type} thread ${threadId} for message ${parentMessageId}`);
+
+    // Broadcast to all channel clients
+    broadcastToChannel(channelId, { type: 'thread.updated', data: { thread } });
+
+    // Register pending auto-thread so AI response is routed into this thread
+    if (connectionId) {
+      pendingPush(connectionId, threadId, parentMessageId);
+    }
+
+    return { threadId, thread };
+  } catch (err) {
+    console.warn(`[auto-thread] create error: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Fetch a single thread from Supabase by ID.
+ * Used to discover ACP-created threads that gateway didn't create.
+ */
+async function fetchThreadFromDb(channelId, threadId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) return null;
+
+  try {
+    const res = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}&channel_id=eq.${encodeURIComponent(channelId)}&limit=1`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+        },
+      }
+    );
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return rows.length ? rows[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Track the last user message ID per connection.
+ * Used to fix ACP threads that have chatId as parentMessageId instead of the actual message ID.
+ */
+const lastUserMessageId = new Map();
+
+/**
+ * Ensure a thread ID (possibly from ACP) is known to clients.
+ * If the thread exists in DB but not in our cache, broadcast it.
+ * Fixes ACP threads whose parentMessageId is a chatId instead of a real message ID.
+ */
+async function ensureThreadKnown(channelId, threadId, connectionId) {
+  if (!threadId || knownThreadIds.has(threadId)) return;
+  knownThreadIds.add(threadId); // mark early to avoid duplicate fetches
+
+  const row = await fetchThreadFromDb(channelId, threadId);
+  if (row) {
+    // Fix ACP threads with non-message parentMessageId (e.g., chatId "Levis" instead of "msg-xxx")
+    const pmid = row.parent_message_id;
+    if (pmid && !pmid.startsWith('msg-') && !pmid.startsWith('delegate-') && !pmid.startsWith('mention-')) {
+      const realMsgId = connectionId ? lastUserMessageId.get(connectionId) : null;
+      if (realMsgId) {
+        row.parent_message_id = realMsgId;
+        // Update in DB
+        const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+        const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+        if (supabaseUrl && supabaseKey) {
+          fetch(`${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}`, {
+            method: 'PATCH',
+            headers: {
+              apikey: supabaseKey,
+              authorization: `Bearer ${supabaseKey}`,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({ parent_message_id: realMsgId }),
+          }).catch(() => {});
+        }
+        console.log(`[auto-thread] fixed ACP thread ${threadId} parentMessageId: "${pmid}" → "${realMsgId}"`);
+      }
+    }
+
+    broadcastToChannel(channelId, { type: 'thread.updated', data: { thread: mapThreadRow(row) } });
+    console.log(`[auto-thread] discovered ACP thread ${threadId}, broadcast to clients`);
+  }
+}
+
 // ── AI Settings & LLM helpers ──
 
 const DEFAULT_SUGGESTION_PROMPT = `You are a suggestion generator for a chat interface. Based on the conversation context, generate 3-5 follow-up questions or actions from the USER's perspective (first person).
@@ -1567,7 +1776,7 @@ backendWss.on("connection", (ws) => {
     closeSocket(ws, 1008, "missing relay.backend.hello");
   }, 5000);
 
-  ws.on("message", (raw) => {
+  ws.on("message", async (raw) => {
     let frame;
     try {
       frame = JSON.parse(raw.toString());
@@ -1628,6 +1837,60 @@ backendWss.on("connection", (ws) => {
       if (!client || client.channelId !== boundChannelId) {
         return;
       }
+
+      // ── Auto-thread triggers (backend → client) ──
+      const evt = frame.event;
+      const evtData = evt?.data || {};
+      let isAutoThreadParent = false; // flag: this message just became a thread parent
+
+      if (evt?.type === 'message.send' && !evtData.threadId) {
+        const msgId = evtData.messageId || '';
+
+        // Trigger 1: Subagent delegation — channel sets messageId starting with "delegate-"
+        // Create thread with delegate echo as parent — do NOT set threadId on the message,
+        // because parent messages must stay visible in the main chat.
+        if (msgId.startsWith('delegate-') && evtData.agentId) {
+          await autoCreateThread(
+            boundChannelId, msgId, evtData.senderId || evtData.agentId,
+            'auto', `Delegation → ${evtData.agentId}`, frame.connectionId
+          );
+          isAutoThreadParent = true;
+        }
+      }
+
+      // Trigger 2: ACP thread discovery — message carries threadId from ACP session
+      if (evtData.threadId) {
+        const normalized = normalizeThreadId(evtData.threadId);
+        if (normalized) {
+          ensureThreadKnown(boundChannelId, normalized, frame.connectionId);
+        }
+      }
+
+      // Trigger 3: Route AI response into pending auto-thread
+      // When an auto-thread was created (e.g., @mention), the AI's response should go into the thread.
+      // Skip if this message is itself the thread parent (isAutoThreadParent).
+      if (!evtData.threadId && !isAutoThreadParent) {
+        const pending = pendingPeek(frame.connectionId);
+        const recentThreadId = getRecentlyShifted(frame.connectionId);
+        const evtType = evt?.type || '';
+        const isStreamEvent = evtType === 'message.send' || evtType === 'thinking.start' || evtType === 'thinking.end' ||
+            evtType === 'thinking.update' || evtType === 'text.delta' || evtType === 'stream.end';
+
+        if (pending && isStreamEvent) {
+          evtData.threadId = pending.threadId;
+          if (evtType === 'message.send' || evtType === 'stream.end') {
+            pendingShift(frame.connectionId);
+            markShifted(frame.connectionId, pending.threadId);
+            console.log(`[auto-thread] routed AI response into thread ${pending.threadId}`);
+          }
+        } else if (!pending && recentThreadId && isStreamEvent) {
+          // Backend sent both stream.end and message.send for the same response;
+          // stream.end already shifted the entry, route this event into the same thread.
+          evtData.threadId = recentThreadId;
+        }
+      }
+      // ── End auto-thread triggers ──
+
       persistMessage(boundChannelId, frame.event, 'outbound', client.userId);
       sendJson(client.ws, frame.event);
 
@@ -1737,7 +2000,7 @@ clientWss.on("connection", (ws, request) => {
     timestamp: Date.now(),
   });
 
-  ws.on("message", (raw) => {
+  ws.on("message", async (raw) => {
     if (!checkWsMsgRateLimit(clientRateBucket)) {
       closeClientConnection(connectionId, 1008, "rate limit exceeded");
       return;
@@ -1793,6 +2056,50 @@ clientWss.on("connection", (ws, request) => {
     }
 
     console.log(`[relay] → forwarding client event to backend ${channelId}: ${event?.type || 'unknown'}`);
+
+    // Track last user message ID per connection (used to fix ACP thread parentMessageId)
+    if (event?.type === 'message.receive' && event.data?.messageId) {
+      lastUserMessageId.set(connectionId, event.data.messageId);
+    }
+
+    // ── Thread reply routing: when user sends a message inside a thread,
+    // remember the threadId so the AI response gets routed back into the same thread.
+    // When user sends a message WITHOUT threadId, clear only reply-sourced pending entries
+    // (keep auto-thread entries like @mention which haven't been consumed yet).
+    if (event?.type === 'message.receive') {
+      if (event.data?.threadId) {
+        pendingPush(connectionId, event.data.threadId, event.data.messageId || 'unknown', 'reply');
+        console.log(`[auto-thread] tracking thread reply, will route AI response to thread ${event.data.threadId}`);
+      } else {
+        // User sent a main-chat message — clear reply-sourced entries only
+        const q = pendingAutoThreads.get(connectionId);
+        if (q) {
+          const filtered = q.filter(e => e.source !== 'reply');
+          if (filtered.length === 0) pendingAutoThreads.delete(connectionId);
+          else pendingAutoThreads.set(connectionId, filtered);
+        }
+      }
+    }
+
+    // ── Auto-thread trigger: @mention detection (client → backend) ──
+    if (event?.type === 'message.receive' && !event.data?.threadId) {
+      const content = event.data?.content || event.data?.text || '';
+      // Match @word at start of string or after whitespace — excludes emails (user@domain)
+      const mentionMatch = content.match(/(^|\s)@(\w+)/);
+      if (mentionMatch) {
+        const mentionedName = mentionMatch[2];
+        const msgId = event.data?.messageId || `mention-${randomUUID()}`;
+        if (!event.data.messageId) event.data.messageId = msgId;
+        // Create thread with this message as parent — do NOT set threadId on the message itself,
+        // because parent messages must stay in the main chat (no threadId).
+        await autoCreateThread(
+          channelId, msgId, authResult.authUser?.senderId,
+          'mention', `@${mentionedName}`, connectionId
+        );
+      }
+    }
+    // ── End @mention trigger ──
+
     persistMessage(channelId, event, 'inbound', authResult.authUser?.senderId);
 
     // Broadcast inbound message to sibling connections (so client B sees what client A sent)
@@ -1814,6 +2121,9 @@ clientWss.on("connection", (ws, request) => {
 
   ws.on("close", (code, reason) => {
     clientConnections.delete(connectionId);
+    pendingClear(connectionId);
+    lastUserMessageId.delete(connectionId);
+    recentlyShifted.delete(connectionId);
     const currentBackend = backends.get(channelId);
     if (!currentBackend || currentBackend.ws.readyState !== WebSocket.OPEN) {
       return;
@@ -2201,6 +2511,8 @@ server.on("request", async (request, response) => {
       const channelId = url.searchParams.get('channelId') || '';
       const chatId = url.searchParams.get('chatId') || '';
       const after = Number(url.searchParams.get('after')) || 0;
+      const before = Number(url.searchParams.get('before')) || 0;
+      const agentId = url.searchParams.get('agentId') || '';
       const limit = Math.min(Number(url.searchParams.get('limit')) || 100, 500);
 
       if (!channelId) {
@@ -2208,15 +2520,23 @@ server.on("request", async (request, response) => {
         return;
       }
 
-      let filter = `select=id,channel_id,sender_id,agent_id,message_id,content,content_type,direction,media_url,meta,timestamp&order=timestamp.asc&limit=${limit}`;
+      // When 'before' is provided, fetch newest messages before that timestamp (desc order).
+      // When 'after' is provided, fetch oldest messages after that timestamp (asc order).
+      const order = before > 0 && after === 0 ? 'timestamp.desc' : 'timestamp.asc';
+      let filter = `select=id,channel_id,sender_id,agent_id,message_id,content,content_type,direction,media_url,meta,timestamp,thread_id&order=${order}&limit=${limit}`;
       filter += `&channel_id=eq.${encodeURIComponent(channelId)}`;
       if (after > 0) filter += `&timestamp=gt.${after}`;
+      if (before > 0) filter += `&timestamp=lt.${before}`;
+      if (agentId) filter += `&agent_id=eq.${encodeURIComponent(agentId)}`;
 
       const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_messages?${filter}`, {
         headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` },
       });
       const rows = await res.json();
-      writeJson(response, 200, { ok: true, messages: rows });
+      // If fetched in desc order, reverse to return chronological (asc) to the client
+      if (order === 'timestamp.desc' && Array.isArray(rows)) rows.reverse();
+      const hasMore = Array.isArray(rows) && rows.length >= limit;
+      writeJson(response, 200, { ok: true, messages: rows, hasMore });
     } catch (err) {
       writeJson(response, 500, { ok: false, error: String(err.message || err) });
     }
