@@ -2922,9 +2922,12 @@ server.on("request", async (request, response) => {
       const TIMEOUT_MS = 120_000; // 2 min
       const POOL_IDLE_MS = 5 * 60_000; // 5 min keep-alive
 
-      // Stable virtualConnId derived from channel+chat so the same "conversation" reuses the same
-      // backend connection, preserving agent context across multiple API calls.
-      const virtualConnId = `api-${channelId}-${chatId}`;
+      // Stable virtualConnId derived from channel+chat+agent so the same conversation with the
+      // same agent reuses the same backend connection, preserving agent context across multiple
+      // API calls. agentId is included to avoid cross-agent connection sharing: if multiple agents
+      // on the same channel receive parallel API calls, they must each have their own virtual
+      // connection so that channel-side agent isolation does not buffer/discard replies.
+      const virtualConnId = `api-${channelId}-${chatId}-${agentId}`;
       const messageId = `api-${Date.now()}-${randomUUID().slice(0, 8)}`;
       const ts = Date.now();
 
