@@ -1997,7 +1997,9 @@ backendWss.on("connection", (ws) => {
         return;
       }
 
-      // Virtual API connection — route to callback instead of WS
+      // Virtual API connection — route to per-request callback instead of WS.
+      // Keyed by inbound messageId (via replyTo) so concurrent requests on the same
+      // (channelId, chatId) don't overwrite each other's callbacks (P0-α).
       if (client.isApi) {
         // Tag outbound event with source:"api" marker for persistence + client rendering
         const apiEvent = frame.event;
@@ -2005,8 +2007,13 @@ backendWss.on("connection", (ws) => {
           apiEvent.data = { ...apiEvent.data, meta: { source: 'api', ...(apiEvent.data.meta || {}) } };
         }
         await persistMessageAsync(boundChannelId, apiEvent, 'outbound', client.userId);
-        const cb = global._apiCallbacks?.get(frame.connectionId);
-        if (cb) cb.onEvent(apiEvent);
+        // Route message.send by replyTo (the inbound messageId the request used).
+        // Other event types (text.delta, thinking.*) lack replyTo and are simply
+        // logged + persisted — HTTP only resolves on message.send.
+        if (apiEvent?.type === 'message.send' && apiEvent?.data?.replyTo) {
+          const cb = global._apiCallbacks?.get(apiEvent.data.replyTo);
+          if (cb) cb.onEvent(apiEvent);
+        }
         return;
       }
 
@@ -3004,13 +3011,15 @@ server.on("request", async (request, response) => {
       // Timeout guard
       const timer = setTimeout(() => rejectReply(new Error('timeout')), TIMEOUT_MS);
 
-            // Register per-request callback so relay.server.event can route the reply here
+      // Register per-request callback so relay.server.event can route the reply here.
+      // Keyed by messageId (the inbound message id) — matches via replyTo on the agent's
+      // message.send. This makes concurrent requests on the same (channel, chat) safe (P0-α).
       if (!global._apiCallbacks) global._apiCallbacks = new Map();
-      global._apiCallbacks.set(virtualConnId, {
+      global._apiCallbacks.set(messageId, {
         onEvent(evt) {
           replyEvents.push(evt);
-          // Resolve on final message.send
-          if (evt?.type === 'message.send') {
+          // Resolve on message.send whose replyTo matches our inbound messageId.
+          if (evt?.type === 'message.send' && evt?.data?.replyTo === messageId) {
             clearTimeout(timer);
             resolveReply(replyEvents);
           }
@@ -3060,7 +3069,7 @@ server.on("request", async (request, response) => {
       try {
         replyEvts = await replyPromise;
       } finally {
-        global._apiCallbacks.delete(virtualConnId);
+        global._apiCallbacks.delete(messageId);
         // Schedule idle close — don't close immediately so context is preserved for next call
         const poolEntry = pool.get(virtualConnId);
         if (poolEntry) {
