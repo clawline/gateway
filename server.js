@@ -3119,6 +3119,10 @@ server.on("request", async (request, response) => {
       writeJson(response, 200, {
         ok: true,
         messageId: replyMessageId,
+        // Echo back the inbound messageId we generated. Caller can use it with
+        // GET /api/messages/sync?channelId=…&after=<ts> to recover the reply if
+        // the HTTP connection drops mid-await (P1-α).
+        inboundMessageId: messageId,
         content: replyText,
         agentId: finalEvt?.data?.agentId || agentId || null,
         chatId,
