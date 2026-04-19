@@ -2245,6 +2245,26 @@ clientWss.on("connection", (ws, request) => {
 
     console.log(`[relay] → forwarding client event to backend ${channelId}: ${event?.type || 'unknown'}`);
 
+    // Validate message.receive payload at the boundary (G-45). Without this, malformed
+    // events were persisted + broadcast first, then rejected by backend — leaking
+    // garbage into cl_messages and to sibling clients.
+    if (event?.type === 'message.receive') {
+      const d = event.data || {};
+      const VALID_MESSAGE_TYPES = ['text', 'image', 'voice', 'audio', 'file'];
+      const errors = [];
+      if (typeof d.content !== 'string' || d.content.length === 0) errors.push('content is required (non-empty string)');
+      if (d.messageType && !VALID_MESSAGE_TYPES.includes(d.messageType)) errors.push(`messageType must be one of ${VALID_MESSAGE_TYPES.join(',')}`);
+      // messageType is optional only if the channel infers it; default to 'text' here for back-compat.
+      if (!d.messageType) d.messageType = 'text';
+      if (errors.length) {
+        sendJson(ws, {
+          type: 'error',
+          data: { code: 'INVALID_PAYLOAD', message: 'Invalid payload for message.receive', details: errors },
+        });
+        return;
+      }
+    }
+
     // Track last user message ID per connection (used to fix ACP thread parentMessageId)
     if (event?.type === 'message.receive' && event.data?.messageId) {
       lastUserMessageId.set(connectionId, event.data.messageId);
