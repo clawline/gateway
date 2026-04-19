@@ -476,9 +476,13 @@ async function _doUpdateThreadOnNewReply(channelId, threadId, senderId, messageI
 
 function broadcastToChannel(channelId, event, excludeConnectionId) {
   for (const [connId, client] of clientConnections) {
-    if (client.channelId === channelId && connId !== excludeConnectionId && client.ws.readyState === WebSocket.OPEN) {
-      sendJson(client.ws, event);
-    }
+    if (connId === excludeConnectionId) continue;
+    // Step A null-guard family: API virtual conns have ws=null and route via
+    // _apiCallbacks instead. Skip them and any other null/closed sockets.
+    if (!client || client.isApi || !client.ws) continue;
+    if (client.channelId !== channelId) continue;
+    if (client.ws.readyState !== WebSocket.OPEN) continue;
+    sendJson(client.ws, event);
   }
 }
 
