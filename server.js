@@ -2014,6 +2014,19 @@ backendWss.on("connection", (ws) => {
           const cb = global._apiCallbacks?.get(apiEvent.data.replyTo);
           if (cb) cb.onEvent(apiEvent);
         }
+        // Sibling fan-out: real WS clients on the same chatId should also see API
+        // outbound (so a Web user watching the same conversation sees the agent's
+        // reply to an API call) — P0-γ F3b. Skip API self + null/closed sockets.
+        if (client.chatId) {
+          for (const [siblingId, sibling] of clientConnections) {
+            if (siblingId === frame.connectionId) continue;
+            if (!sibling || sibling.isApi || !sibling.ws) continue;
+            if (sibling.channelId !== boundChannelId) continue;
+            if (sibling.chatId !== client.chatId) continue;
+            if (sibling.ws.readyState !== WebSocket.OPEN) continue;
+            sendJson(sibling.ws, apiEvent);
+          }
+        }
         return;
       }
 
@@ -2998,11 +3011,16 @@ server.on("request", async (request, response) => {
       // Persist inbound message
       await persistMessageAsync(channelId, inboundEvent, 'inbound', senderId);
 
-      // Broadcast inbound to all WS clients on this channel so the chat UI shows it in real time
+      // Broadcast inbound to real WS clients on the SAME chatId so chat UI shows it
+      // in real time. Filter by chatId (P0-γ F3a) — was previously broadcasting to
+      // the entire channel, leaking API messages into unrelated conversations. Skip
+      // API virtual conns (ws=null) per Step A's null-guard contract.
       for (const [, conn] of clientConnections) {
-        if (conn.channelId === channelId && conn.ws && conn.ws.readyState === 1 /* OPEN */) {
-          sendJson(conn.ws, { type: 'message.send', data: { ...inboundEvent.data, direction: 'inbound', echo: true } });
-        }
+        if (conn.isApi || !conn.ws) continue;
+        if (conn.channelId !== channelId) continue;
+        if (conn.chatId !== chatId) continue;
+        if (conn.ws.readyState !== 1 /* OPEN */) continue;
+        sendJson(conn.ws, { type: 'message.send', data: { ...inboundEvent.data, direction: 'inbound', echo: true } });
       }
 
       // Register virtual connection so backend replies can be routed here
