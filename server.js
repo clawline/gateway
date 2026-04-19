@@ -3038,6 +3038,40 @@ server.on("request", async (request, response) => {
         existing.idleTimer = null;
       }
 
+      // Optional: route the message into a specific thread. If provided, validate it
+      // exists + belongs to this channel; otherwise return 400. We do NOT silently
+      // fall back to main chat — caller asked for a thread, getting silent re-routing
+      // would be surprising (TH-2).
+      const requestedThreadId = (typeof body.threadId === 'string' && body.threadId.trim())
+        ? body.threadId.trim()
+        : (url.searchParams.get('threadId') || '').trim() || null;
+      if (requestedThreadId) {
+        const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+        const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+        if (!supabaseUrl || !supabaseKey) {
+          writeJson(response, 503, { ok: false, error: 'thread persistence not configured' });
+          return;
+        }
+        try {
+          const tRes = await fetch(
+            `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(requestedThreadId)}&channel_id=eq.${encodeURIComponent(channelId)}&select=id,status&limit=1`,
+            { headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` } }
+          );
+          const rows = await tRes.json();
+          if (!Array.isArray(rows) || rows.length === 0) {
+            writeJson(response, 400, { ok: false, error: `threadId not found in channel ${channelId}` });
+            return;
+          }
+          if (rows[0].status === 'deleted') {
+            writeJson(response, 400, { ok: false, error: 'threadId is deleted' });
+            return;
+          }
+        } catch (err) {
+          writeJson(response, 500, { ok: false, error: `thread lookup failed: ${err.message || err}` });
+          return;
+        }
+      }
+
       // Build inbound event with source:"api" marker
       const inboundEvent = {
         type: 'message.receive',
@@ -3051,6 +3085,7 @@ server.on("request", async (request, response) => {
           messageType: 'text',
           content: message,
           timestamp: ts,
+          ...(requestedThreadId ? { threadId: requestedThreadId } : {}),
           meta: { source: 'api' },
         },
       };
