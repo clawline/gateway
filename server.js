@@ -2114,6 +2114,24 @@ backendWss.on("connection", (ws) => {
         return;
       }
       clientConnections.delete(frame.connectionId);
+      // API virtual conn (ws=null): notify any pending /api/chat callbacks via onError
+      // so the HTTP request gets a fast 502 instead of waiting for timeout (P1-γ).
+      if (client.isApi) {
+        if (global._apiCallbacks) {
+          for (const [mid, cb] of global._apiCallbacks) {
+            // virtualConnId encodes channel+chat; we can't cleanly cross-walk
+            // messageId → virtualConnId here, so reject all callbacks tagged for
+            // this channel/chat. The pool is keyed by virtualConnId; iterate cb
+            // entries paired in pool meta if needed. For now reject everything
+            // matching this connectionId via metadata stamped at register time.
+            if (cb.virtualConnId === frame.connectionId) {
+              try { cb.onError(new Error(`agent rejected: ${frame.message || 'unknown'}`)); } catch {}
+              global._apiCallbacks.delete(mid);
+            }
+          }
+        }
+        return;
+      }
       closeSocket(client.ws, frame.code || 1008, frame.message || "rejected");
       return;
     }
@@ -2124,6 +2142,18 @@ backendWss.on("connection", (ws) => {
         return;
       }
       clientConnections.delete(frame.connectionId);
+      // Same null-guard as relay.server.reject (above) — API virtual conn has ws=null.
+      if (client.isApi) {
+        if (global._apiCallbacks) {
+          for (const [mid, cb] of global._apiCallbacks) {
+            if (cb.virtualConnId === frame.connectionId) {
+              try { cb.onError(new Error(`agent closed: ${frame.reason || 'closed'}`)); } catch {}
+              global._apiCallbacks.delete(mid);
+            }
+          }
+        }
+        return;
+      }
       closeSocket(client.ws, frame.code || 1000, frame.reason || "closed");
     }
   });
@@ -3038,8 +3068,11 @@ server.on("request", async (request, response) => {
       // Register per-request callback so relay.server.event can route the reply here.
       // Keyed by messageId (the inbound message id) — matches via replyTo on the agent's
       // message.send. This makes concurrent requests on the same (channel, chat) safe (P0-α).
+      // Stamp virtualConnId so reject/close handlers (P1-γ) can fail-fast all pending
+      // callbacks for a given API conn without scanning HTTP request scopes.
       if (!global._apiCallbacks) global._apiCallbacks = new Map();
       global._apiCallbacks.set(messageId, {
+        virtualConnId,
         onEvent(evt) {
           replyEvents.push(evt);
           // Resolve on message.send whose replyTo matches our inbound messageId.
@@ -3132,6 +3165,8 @@ server.on("request", async (request, response) => {
     } catch (err) {
       if (err.message === 'timeout') {
         writeJson(response, 504, { ok: false, error: 'agent did not respond within timeout' });
+      } else if (err.message?.startsWith('agent rejected') || err.message?.startsWith('agent closed')) {
+        writeJson(response, 502, { ok: false, error: err.message });
       } else {
         console.error('[api/chat]', err);
         writeJson(response, 500, { ok: false, error: String(err.message || err) });
