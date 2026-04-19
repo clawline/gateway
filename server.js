@@ -2053,8 +2053,6 @@ backendWss.on("connection", (ws) => {
         }
         await persistMessageAsync(boundChannelId, apiEvent, 'outbound', client.userId);
         // Route message.send by replyTo (the inbound messageId the request used).
-        // Other event types (text.delta, thinking.*) lack replyTo and are simply
-        // logged + persisted — HTTP only resolves on message.send.
         if (apiEvent?.type === 'message.send') {
           const replyTo = apiEvent?.data?.replyTo;
           let cb = replyTo ? global._apiCallbacks?.get(replyTo) : undefined;
@@ -2063,13 +2061,24 @@ backendWss.on("connection", (ws) => {
           // virtualConnId so one of the in-flight requests still gets a reply rather
           // than hanging to timeout.
           if (!cb && global._apiCallbacks) {
-            for (const [mid, c] of global._apiCallbacks) {
+            for (const [, c] of global._apiCallbacks) {
               if (c.virtualConnId === frame.connectionId) { cb = c; break; }
             }
           }
           const cbCount = global._apiCallbacks?.size || 0;
           console.log(`[api/chat] message.send replyTo=${replyTo || 'NONE'} cb=${cb ? 'HIT' : 'MISS'} pending=${cbCount}`);
           if (cb) cb.onEvent(apiEvent);
+        } else {
+          // Non-message.send events (agent.list, agent.selected, history.sync,
+          // thinking.*, text.delta, etc) lack replyTo. Route to ALL callbacks
+          // tagged for this virtualConnId — they decide internally whether the
+          // event is for them (e.g. handleAgentList filters by requestId).
+          // Without this, /api/agents and other non-chat APIs cannot get replies.
+          if (global._apiCallbacks) {
+            for (const [, c] of global._apiCallbacks) {
+              if (c.virtualConnId === frame.connectionId) c.onEvent(apiEvent);
+            }
+          }
         }
         // Sibling fan-out: real WS clients on the same chatId should also see API
         // outbound (so a Web user watching the same conversation sees the agent's
@@ -2518,6 +2527,10 @@ async function handleAgentList(response) {
           // Register virtual client so relay.server.event routes here
           if (!global._apiCallbacks) global._apiCallbacks = new Map();
           global._apiCallbacks.set(virtualConnId, {
+            // Stamp virtualConnId so the boundary router can find this callback
+            // by connection (agent.list events lack replyTo, so the messageId-keyed
+            // dispatch from F1 won't match — see backend.event handler isApi branch).
+            virtualConnId,
             onEvent(evt) {
               if (evt?.type === 'agent.list' && evt?.data?.requestId === requestId) {
                 clearTimeout(timer);
