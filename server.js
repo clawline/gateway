@@ -42,6 +42,10 @@ const MEDIA_MIME_MAP = {
   ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
   ".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".wav": "audio/wav",
   ".mp4": "video/mp4", ".webm": "video/webm", ".pdf": "application/pdf",
+  ".txt": "text/plain; charset=utf-8", ".md": "text/markdown; charset=utf-8",
+  ".json": "application/json", ".csv": "text/csv; charset=utf-8",
+  ".html": "text/html; charset=utf-8", ".xml": "application/xml",
+  ".zip": "application/zip", ".gz": "application/gzip",
 };
 
 // Ensure media directory exists
