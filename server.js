@@ -2376,12 +2376,17 @@ clientWss.on("connection", (ws, request) => {
 
     await persistMessageAsync(channelId, event, 'inbound', authResult.authUser?.senderId);
 
-    // Broadcast inbound message to sibling connections (so client B sees what client A sent)
+    // Broadcast inbound message to sibling connections (so client B sees what client A sent).
+    // Skip API virtual conns (ws=null, route via _apiCallbacks) and any sibling whose ws
+    // was nulled or is not OPEN — same defensive contract as Step A's other sibling loop.
     if (query.chatId && (event?.type === 'message.receive')) {
       for (const [siblingId, sibling] of clientConnections) {
-        if (siblingId !== connectionId && sibling.channelId === channelId && sibling.chatId === query.chatId && sibling.ws.readyState === WebSocket.OPEN) {
-          sendJson(sibling.ws, { type: 'message.send', data: { ...event.data, echo: true } });
-        }
+        if (siblingId === connectionId) continue;
+        if (!sibling || sibling.isApi || !sibling.ws) continue;
+        if (sibling.channelId !== channelId) continue;
+        if (sibling.chatId !== query.chatId) continue;
+        if (sibling.ws.readyState !== WebSocket.OPEN) continue;
+        sendJson(sibling.ws, { type: 'message.send', data: { ...event.data, echo: true } });
       }
     }
 
