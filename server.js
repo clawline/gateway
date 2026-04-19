@@ -425,43 +425,26 @@ void loadRelaySettings().then((s) => {
 
 /**
  * Update thread metadata when a new reply message is persisted.
- * Increments reply_count, sets last_reply_at, appends sender to participant_ids,
- * and broadcasts thread.updated + thread.new_reply events.
  *
- * TH-5: per-thread serialization. The previous SELECT → +1 → PATCH was racey
- * under concurrent replies (two callers both SELECT old count, both PATCH old+1).
- * We now chain per-threadId promises so updates serialize. Plus: PATCH uses
- * `Prefer: tx=ours` plus column expression (`reply_count = reply_count + 1`)
- * via PostgREST RPC-style call — fall back to SELECT-PATCH on environments
- * where that's not supported (current PostgREST: not supported, so we rely on
- * the per-thread mutex below).
+ * D9: deleted the per-thread mutex (`_threadUpdateChain`) and the
+ * SELECT → +1 → PATCH dance. reply_count is no longer written here —
+ * handleThreadGet / handleThreadList compute it on demand via
+ * `prefer: count=exact, Range: 0-0` against cl_messages (ADD-BACK #1).
+ * That removes the race entirely (5 concurrent replies can't undercount
+ * a value that's never stored). last_reply_at + participant_ids stay
+ * because they don't need atomic counting.
  */
-const _threadUpdateChain = new Map();
 async function updateThreadOnNewReply(channelId, threadId, senderId, messageId, content) {
   threadId = normalizeThreadId(threadId);
   if (!threadId) return;
-  // Chain on the thread id so concurrent calls serialize.
-  const prev = _threadUpdateChain.get(threadId) || Promise.resolve();
-  const next = prev.then(() => _doUpdateThreadOnNewReply(channelId, threadId, senderId, messageId, content)).catch((e) => {
-    console.warn(`[threads] update chain error for ${threadId}: ${e.message || e}`);
-  });
-  _threadUpdateChain.set(threadId, next);
-  // Best-effort cleanup so the map doesn't grow unbounded.
-  next.finally(() => {
-    if (_threadUpdateChain.get(threadId) === next) _threadUpdateChain.delete(threadId);
-  });
-  return next;
-}
-
-async function _doUpdateThreadOnNewReply(channelId, threadId, senderId, messageId, content) {
   const supabaseUrl = process.env.RELAY_SUPABASE_URL;
   const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
   if (!supabaseUrl || !supabaseKey) return;
 
   try {
-    // 1. Fetch current thread
+    // 1. Fetch current thread (only to check status + read existing participants)
     const getRes = await fetch(
-      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}&limit=1`,
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}&select=status,participant_ids&limit=1`,
       {
         headers: {
           apikey: supabaseKey,
@@ -476,7 +459,7 @@ async function _doUpdateThreadOnNewReply(channelId, threadId, senderId, messageI
     // Skip if thread is deleted
     if (thread.status === 'deleted') return;
 
-    // 2. Build update payload
+    // 2. Build update payload — no reply_count, computed on demand by readers.
     const now = new Date().toISOString();
     const participantIds = Array.isArray(thread.participant_ids)
       ? thread.participant_ids
@@ -487,7 +470,6 @@ async function _doUpdateThreadOnNewReply(channelId, threadId, senderId, messageI
     }
 
     const updateRow = {
-      reply_count: (thread.reply_count || 0) + 1,
       last_reply_at: now,
       participant_ids: JSON.stringify(participantIds),
       updated_at: now,
@@ -511,13 +493,18 @@ async function _doUpdateThreadOnNewReply(channelId, threadId, senderId, messageI
     if (!updatedRows.length) return;
     const updatedThread = updatedRows[0];
 
-    // 4. Broadcast thread.updated to all channel subscribers
+    // 4. Compute reply_count on demand for the broadcast — readers will recount,
+    // but the broadcast carries an authoritative number so listeners don't have
+    // to re-query immediately.
+    const replyCount = await countThreadReplies(threadId);
+
+    // 5. Broadcast thread.updated to all channel subscribers
     broadcastToChannel(channelId, {
       type: 'thread.updated',
-      data: { thread: mapThreadRow(updatedThread) },
+      data: { thread: { ...mapThreadRow(updatedThread), replyCount } },
     });
 
-    // 5. Broadcast thread.new_reply to all channel subscribers
+    // 6. Broadcast thread.new_reply to all channel subscribers
     const preview = (content || '').substring(0, 100);
     broadcastToChannel(channelId, {
       type: 'thread.new_reply',
@@ -530,6 +517,40 @@ async function _doUpdateThreadOnNewReply(channelId, threadId, senderId, messageI
     });
   } catch (err) {
     console.warn(`[threads] metadata update failed for thread ${threadId}: ${err.message}`);
+  }
+}
+
+/**
+ * ADD-BACK #1: count reply messages for a thread on demand.
+ * Uses PostgREST `prefer: count=exact` + tiny range so we get the count
+ * without paying for the row data. Index on cl_messages.thread_id makes
+ * this a single sub-millisecond lookup.
+ */
+async function countThreadReplies(threadId) {
+  threadId = normalizeThreadId(threadId);
+  if (!threadId) return 0;
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) return 0;
+  try {
+    const res = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_messages?thread_id=eq.${encodeURIComponent(threadId)}&select=message_id`,
+      {
+        headers: {
+          apikey: supabaseKey,
+          authorization: `Bearer ${supabaseKey}`,
+          prefer: 'count=exact',
+          range: '0-0',
+        },
+      }
+    );
+    if (!res.ok) return 0;
+    const cr = res.headers.get('content-range');
+    if (!cr) return 0;
+    const m = cr.match(/\/(\d+)/);
+    return m ? parseInt(m[1], 10) : 0;
+  } catch {
+    return 0;
   }
 }
 
@@ -680,7 +701,9 @@ async function handleThreadGet(connectionId, channelId, data, userId) {
       return;
     }
 
-    const thread = mapThreadRow(threadRow);
+    // ADD-BACK #1: reply_count computed on demand from cl_messages.
+    const replyCount = await countThreadReplies(threadId);
+    const thread = { ...mapThreadRow(threadRow), replyCount };
 
     // Fetch last 20 messages in thread
     const messagesRes = await fetch(
@@ -823,7 +846,13 @@ async function handleThreadList(connectionId, channelId, data, userId) {
     }
 
     const threadRows = await threadsRes.json();
-    const threads = threadRows.map(mapThreadRow);
+    const threadsBase = threadRows.map(mapThreadRow);
+
+    // ADD-BACK #1: compute reply_count on demand for each thread, in parallel.
+    // Each query is index-served (cl_messages.thread_id) and tiny (count only).
+    const threads = await Promise.all(
+      threadsBase.map(async (t) => ({ ...t, replyCount: await countThreadReplies(t.id) })),
+    );
 
     // Compute unread count for each thread if we have a userId
     const threadsWithUnread = await Promise.all(
