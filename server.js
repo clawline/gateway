@@ -1573,7 +1573,14 @@ async function requireAuthAny(request, response, url) {
   const bearer = normalizeNonEmpty(request.headers["authorization"]?.replace(/^Bearer\s+/, ""));
   const token = queryToken || bearer;
   if (token) {
-    const cfg = await relayStore.loadConfig();
+    let cfg;
+    try {
+      cfg = await relayStore.loadConfig();
+    } catch (err) {
+      console.error('[auth] loadConfig failed:', err.message);
+      writeJson(response, 503, { ok: false, error: 'auth lookup unavailable' });
+      return false;
+    }
     if (Object.values(cfg?.channels || {}).some(ch => ch.users?.some(u => safeCompare(u.token, token)))) {
       return true;
     }
@@ -3319,15 +3326,27 @@ server.on("request", async (request, response) => {
       const bearer = normalizeNonEmpty(request.headers["authorization"]?.replace(/^Bearer\s+/, ""));
       const token = queryToken || bearer;
       if (token) {
-        const cfg = await relayStore.loadConfig();
-        if (Object.values(cfg?.channels || {}).some(ch => ch.users?.some(u => safeCompare(u.token, token)))) {
-          authed = true;
+        try {
+          const cfg = await relayStore.loadConfig();
+          if (Object.values(cfg?.channels || {}).some(ch => ch.users?.some(u => safeCompare(u.token, token)))) {
+            authed = true;
+          }
+        } catch (err) {
+          console.error('[upload-auth] loadConfig failed:', err.message);
+          writeJson(response, 503, { ok: false, error: 'auth lookup unavailable' });
+          return;
         }
       }
     }
     if (!authed && channelSecret) {
-      const relayConfig = await relayStore.loadConfig();
-      authed = Object.values(relayConfig?.channels || {}).some(ch => safeCompare(ch.secret, channelSecret));
+      try {
+        const relayConfig = await relayStore.loadConfig();
+        authed = Object.values(relayConfig?.channels || {}).some(ch => safeCompare(ch.secret, channelSecret));
+      } catch (err) {
+        console.error('[upload-auth] loadConfig failed (secret path):', err.message);
+        writeJson(response, 503, { ok: false, error: 'auth lookup unavailable' });
+        return;
+      }
     }
     if (!authed) {
       writeJson(response, 401, { ok: false, error: "auth required" });
