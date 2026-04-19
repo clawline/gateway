@@ -366,9 +366,33 @@ void loadRelaySettings().then((s) => {
  * Update thread metadata when a new reply message is persisted.
  * Increments reply_count, sets last_reply_at, appends sender to participant_ids,
  * and broadcasts thread.updated + thread.new_reply events.
+ *
+ * TH-5: per-thread serialization. The previous SELECT → +1 → PATCH was racey
+ * under concurrent replies (two callers both SELECT old count, both PATCH old+1).
+ * We now chain per-threadId promises so updates serialize. Plus: PATCH uses
+ * `Prefer: tx=ours` plus column expression (`reply_count = reply_count + 1`)
+ * via PostgREST RPC-style call — fall back to SELECT-PATCH on environments
+ * where that's not supported (current PostgREST: not supported, so we rely on
+ * the per-thread mutex below).
  */
+const _threadUpdateChain = new Map();
 async function updateThreadOnNewReply(channelId, threadId, senderId, messageId, content) {
   threadId = normalizeThreadId(threadId);
+  if (!threadId) return;
+  // Chain on the thread id so concurrent calls serialize.
+  const prev = _threadUpdateChain.get(threadId) || Promise.resolve();
+  const next = prev.then(() => _doUpdateThreadOnNewReply(channelId, threadId, senderId, messageId, content)).catch((e) => {
+    console.warn(`[threads] update chain error for ${threadId}: ${e.message || e}`);
+  });
+  _threadUpdateChain.set(threadId, next);
+  // Best-effort cleanup so the map doesn't grow unbounded.
+  next.finally(() => {
+    if (_threadUpdateChain.get(threadId) === next) _threadUpdateChain.delete(threadId);
+  });
+  return next;
+}
+
+async function _doUpdateThreadOnNewReply(channelId, threadId, senderId, messageId, content) {
   const supabaseUrl = process.env.RELAY_SUPABASE_URL;
   const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
   if (!supabaseUrl || !supabaseKey) return;
