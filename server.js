@@ -660,7 +660,10 @@ async function handleThreadList(connectionId, channelId, data, userId) {
   const status = data?.status || 'active';
   const participantId = data?.participantId || null;
   const page = Math.max(1, parseInt(data?.page, 10) || 1);
-  const pageSize = Math.min(100, Math.max(1, parseInt(data?.pageSize, 10) || 20));
+  // Accept both `pageSize` (canonical) and `limit` (documented alias). Without either,
+  // default to 20. Cap at 100 to prevent unbounded queries.
+  const requestedSize = data?.pageSize ?? data?.limit ?? 20;
+  const pageSize = Math.min(100, Math.max(1, parseInt(requestedSize, 10) || 20));
   const offset = (page - 1) * pageSize;
 
   try {
