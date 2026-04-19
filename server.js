@@ -474,15 +474,41 @@ async function _doUpdateThreadOnNewReply(channelId, threadId, senderId, messageI
 
 // ── Thread operations (Supabase CRUD) ──
 
+/**
+ * Send `event` to every real WebSocket client on (channelId, chatId), optionally
+ * excluding one connectionId (the originator). Single source of truth for sibling
+ * fan-out — replaces 4 near-identical inline loops in different message paths
+ * (D11, reliability-v2 plan).
+ *
+ * temporary null guard pending D1+D2: API virtual connections currently coexist
+ * with real WS in `clientConnections` (ws=null, isApi=true). The `!c.ws || c.isApi`
+ * checks below MUST be removed when D1+D2 splits the maps into `realClients` /
+ * `apiSessions` — by construction, real WS will never be null.
+ */
+function fanOut(channelId, chatId, event, excludeConnectionId) {
+  for (const [id, c] of clientConnections) {
+    if (id === excludeConnectionId) continue;
+    if (!c || c.isApi || !c.ws) continue; // TEMP: see header note (D1+D2 cleanup)
+    if (c.channelId !== channelId) continue;
+    if (c.chatId !== chatId) continue;
+    if (c.ws.readyState !== WebSocket.OPEN) continue;
+    sendJson(c.ws, event);
+  }
+}
+
+/**
+ * Channel-wide broadcast (e.g. thread.updated). Same null guards as fanOut, no
+ * chatId filter.
+ *
+ * temporary null guard pending D1+D2: see fanOut header.
+ */
 function broadcastToChannel(channelId, event, excludeConnectionId) {
-  for (const [connId, client] of clientConnections) {
-    if (connId === excludeConnectionId) continue;
-    // Step A null-guard family: API virtual conns have ws=null and route via
-    // _apiCallbacks instead. Skip them and any other null/closed sockets.
-    if (!client || client.isApi || !client.ws) continue;
-    if (client.channelId !== channelId) continue;
-    if (client.ws.readyState !== WebSocket.OPEN) continue;
-    sendJson(client.ws, event);
+  for (const [id, c] of clientConnections) {
+    if (id === excludeConnectionId) continue;
+    if (!c || c.isApi || !c.ws) continue; // TEMP: see fanOut header (D1+D2 cleanup)
+    if (c.channelId !== channelId) continue;
+    if (c.ws.readyState !== WebSocket.OPEN) continue;
+    sendJson(c.ws, event);
   }
 }
 
@@ -2084,16 +2110,9 @@ backendWss.on("connection", (ws) => {
         }
         // Sibling fan-out: real WS clients on the same chatId should also see API
         // outbound (so a Web user watching the same conversation sees the agent's
-        // reply to an API call) — P0-γ F3b. Skip API self + null/closed sockets.
+        // reply to an API call) — P0-γ F3b. Single fanOut() handles all guards.
         if (client.chatId) {
-          for (const [siblingId, sibling] of clientConnections) {
-            if (siblingId === frame.connectionId) continue;
-            if (!sibling || sibling.isApi || !sibling.ws) continue;
-            if (sibling.channelId !== boundChannelId) continue;
-            if (sibling.chatId !== client.chatId) continue;
-            if (sibling.ws.readyState !== WebSocket.OPEN) continue;
-            sendJson(sibling.ws, apiEvent);
-          }
+          fanOut(boundChannelId, client.chatId, apiEvent, frame.connectionId);
         }
         return;
       }
@@ -2155,17 +2174,9 @@ backendWss.on("connection", (ws) => {
       sendJson(client.ws, frame.event);
 
       // Broadcast to sibling connections (same channelId + chatId, different connectionId).
-      // Skip API virtual connections (ws=null, replies routed via _apiCallbacks instead) and
-      // any sibling whose ws was nulled or is not OPEN.
+      // Single fanOut() handles all guards.
       if (client.chatId) {
-        for (const [siblingId, sibling] of clientConnections) {
-          if (siblingId === frame.connectionId) continue;
-          if (!sibling || sibling.isApi || !sibling.ws) continue;
-          if (sibling.channelId !== boundChannelId) continue;
-          if (sibling.chatId !== client.chatId) continue;
-          if (sibling.ws.readyState !== WebSocket.OPEN) continue;
-          sendJson(sibling.ws, frame.event);
-        }
+        fanOut(boundChannelId, client.chatId, frame.event, frame.connectionId);
       }
       return;
     }
@@ -2433,17 +2444,9 @@ clientWss.on("connection", (ws, request) => {
     await persistMessageAsync(channelId, event, 'inbound', authResult.authUser?.senderId);
 
     // Broadcast inbound message to sibling connections (so client B sees what client A sent).
-    // Skip API virtual conns (ws=null, route via _apiCallbacks) and any sibling whose ws
-    // was nulled or is not OPEN — same defensive contract as Step A's other sibling loop.
+    // Single fanOut() handles all guards.
     if (query.chatId && (event?.type === 'message.receive')) {
-      for (const [siblingId, sibling] of clientConnections) {
-        if (siblingId === connectionId) continue;
-        if (!sibling || sibling.isApi || !sibling.ws) continue;
-        if (sibling.channelId !== channelId) continue;
-        if (sibling.chatId !== query.chatId) continue;
-        if (sibling.ws.readyState !== WebSocket.OPEN) continue;
-        sendJson(sibling.ws, { type: 'message.send', data: { ...event.data, echo: true } });
-      }
+      fanOut(channelId, query.chatId, { type: 'message.send', data: { ...event.data, echo: true } }, connectionId);
     }
 
     sendJson(currentBackend.ws, {
@@ -3154,16 +3157,8 @@ server.on("request", async (request, response) => {
       await persistMessageAsync(channelId, inboundEvent, 'inbound', senderId);
 
       // Broadcast inbound to real WS clients on the SAME chatId so chat UI shows it
-      // in real time. Filter by chatId (P0-γ F3a) — was previously broadcasting to
-      // the entire channel, leaking API messages into unrelated conversations. Skip
-      // API virtual conns (ws=null) per Step A's null-guard contract.
-      for (const [, conn] of clientConnections) {
-        if (conn.isApi || !conn.ws) continue;
-        if (conn.channelId !== channelId) continue;
-        if (conn.chatId !== chatId) continue;
-        if (conn.ws.readyState !== 1 /* OPEN */) continue;
-        sendJson(conn.ws, { type: 'message.send', data: { ...inboundEvent.data, direction: 'inbound', echo: true } });
-      }
+      // in real time. Single fanOut() handles all guards (P0-γ F3a).
+      fanOut(channelId, chatId, { type: 'message.send', data: { ...inboundEvent.data, direction: 'inbound', echo: true } });
 
       // Register virtual connection so backend replies can be routed here
       const replyEvents = [];
