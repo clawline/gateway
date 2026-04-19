@@ -2010,8 +2010,20 @@ backendWss.on("connection", (ws) => {
         // Route message.send by replyTo (the inbound messageId the request used).
         // Other event types (text.delta, thinking.*) lack replyTo and are simply
         // logged + persisted — HTTP only resolves on message.send.
-        if (apiEvent?.type === 'message.send' && apiEvent?.data?.replyTo) {
-          const cb = global._apiCallbacks?.get(apiEvent.data.replyTo);
+        if (apiEvent?.type === 'message.send') {
+          const replyTo = apiEvent?.data?.replyTo;
+          let cb = replyTo ? global._apiCallbacks?.get(replyTo) : undefined;
+          // Fallback: agent occasionally emits message.send WITHOUT replyTo (coalesced
+          // replies, follow-up notes). Route to the oldest pending callback on this
+          // virtualConnId so one of the in-flight requests still gets a reply rather
+          // than hanging to timeout.
+          if (!cb && global._apiCallbacks) {
+            for (const [mid, c] of global._apiCallbacks) {
+              if (c.virtualConnId === frame.connectionId) { cb = c; break; }
+            }
+          }
+          const cbCount = global._apiCallbacks?.size || 0;
+          console.log(`[api/chat] message.send replyTo=${replyTo || 'NONE'} cb=${cb ? 'HIT' : 'MISS'} pending=${cbCount}`);
           if (cb) cb.onEvent(apiEvent);
         }
         // Sibling fan-out: real WS clients on the same chatId should also see API
@@ -3075,8 +3087,11 @@ server.on("request", async (request, response) => {
         virtualConnId,
         onEvent(evt) {
           replyEvents.push(evt);
-          // Resolve on message.send whose replyTo matches our inbound messageId.
-          if (evt?.type === 'message.send' && evt?.data?.replyTo === messageId) {
+          // Resolve on any message.send the dispatcher routed to us. The router
+          // matches by replyTo when set, falls back to FIFO by virtualConnId
+          // when replyTo is missing — either way, message.send arriving here is
+          // intended for THIS request.
+          if (evt?.type === 'message.send') {
             clearTimeout(timer);
             resolveReply(replyEvents);
           }
