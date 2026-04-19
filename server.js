@@ -257,6 +257,48 @@ function buildPersistRow(channelId, event, direction, senderId) {
 }
 
 /**
+ * ADD-BACK #7: HTTP idempotency check.
+ *
+ * Look up cl_messages for an existing inbound with this messageId. If found,
+ * also look up its outbound reply (parent_id = messageId, direction = outbound).
+ *
+ * Returns:
+ *   null            — never seen this messageId, proceed normally
+ *   { kind: 'cached', outbound: row } — both seen; caller can serve cached reply
+ *   { kind: 'in_flight' }             — inbound persisted but reply not yet
+ *
+ * Best-effort: on any DB error returns null so the caller falls through to
+ * normal processing (idempotency is a nice-to-have, not a correctness gate
+ * — the underlying ON CONFLICT in cl_messages still prevents duplicate rows).
+ */
+async function checkIdempotency(channelId, messageId) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey || !messageId) return null;
+  try {
+    const inRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_messages?channel_id=eq.${encodeURIComponent(channelId)}&message_id=eq.${encodeURIComponent(messageId)}&direction=eq.inbound&select=id&limit=1`,
+      { headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` } }
+    );
+    if (!inRes.ok) return null;
+    const inRows = await inRes.json();
+    if (!Array.isArray(inRows) || inRows.length === 0) return null;
+    const outRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_messages?channel_id=eq.${encodeURIComponent(channelId)}&parent_id=eq.${encodeURIComponent(messageId)}&direction=eq.outbound&select=message_id,content,agent_id,timestamp&limit=1`,
+      { headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` } }
+    );
+    if (!outRes.ok) return { kind: 'in_flight' };
+    const outRows = await outRes.json();
+    if (Array.isArray(outRows) && outRows.length > 0) {
+      return { kind: 'cached', outbound: outRows[0] };
+    }
+    return { kind: 'in_flight' };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Persist a message to Supabase synchronously (awaitable).
  * Retries inline up to PERSIST_MAX_RETRIES times.
  * On final failure, writes to dead-letter file on disk.
@@ -2044,6 +2086,26 @@ backendWss.on("connection", (ws) => {
           if (normalized) ensureThreadKnown(boundChannelId, normalized);
         }
 
+        // D6: if this is a message.send acking a stashed inbound, persist the
+        // inbound first so cl_messages contains both rows in the right order,
+        // then fan the inbound echo to siblings (sibling tabs see what their
+        // peer sent only after the agent has actually replied).
+        if (evt?.type === 'message.send' && evtData.replyTo && real.pendingInbound) {
+          const stash = real.pendingInbound.get(evtData.replyTo);
+          if (stash) {
+            await persistMessageAsync(boundChannelId, stash.event, 'inbound', stash.senderId);
+            if (real.chatId) {
+              fanOut(
+                boundChannelId,
+                real.chatId,
+                { type: 'message.send', data: { ...stash.event.data, echo: true } },
+                frame.connectionId,
+              );
+            }
+            real.pendingInbound.delete(evtData.replyTo);
+          }
+        }
+
         await persistMessageAsync(boundChannelId, frame.event, 'outbound', real.userId);
         sendJson(real.ws, frame.event);
         if (real.chatId) {
@@ -2058,28 +2120,50 @@ backendWss.on("connection", (ws) => {
         if (apiEvent?.data && typeof apiEvent.data === 'object') {
           apiEvent.data = { ...apiEvent.data, meta: { source: 'api', ...(apiEvent.data.meta || {}) } };
         }
-        await persistMessageAsync(boundChannelId, apiEvent, 'outbound', sess.userId);
 
         // D3: route message.send strictly by replyTo. Agent missing replyTo = no
         // resolution, the caller's timer trips → 504. No FIFO fallback.
+        // D6: ack-then-persist — on a routable message.send we persist inbound
+        // (from req.inboundEvent) THEN outbound, then fan out the inbound echo
+        // to siblings followed by the outbound. Both reach the DB and other
+        // clients only after the agent has actually replied. Untimely / failed
+        // requests leave zero rows.
+        let routedToCaller = false;
         if (apiEvent?.type === 'message.send') {
           const replyTo = apiEvent?.data?.replyTo;
           if (replyTo) {
             const req = sess.requests.get(replyTo);
             if (req) {
+              if (req.inboundEvent) {
+                await persistMessageAsync(boundChannelId, req.inboundEvent, 'inbound', req.senderId);
+              }
+              await persistMessageAsync(boundChannelId, apiEvent, 'outbound', sess.userId);
+              if (sess.chatId && req.inboundEvent) {
+                fanOut(
+                  boundChannelId,
+                  sess.chatId,
+                  { type: 'message.send', data: { ...req.inboundEvent.data, direction: 'inbound', echo: true } },
+                );
+              }
+              if (sess.chatId) {
+                fanOut(boundChannelId, sess.chatId, apiEvent, frame.connectionId);
+              }
               req.replyEvents.push(apiEvent);
               clearTimeout(req.timer);
               req.resolve(req.replyEvents);
               sess.requests.delete(replyTo);
+              routedToCaller = true;
             }
           }
-          // else: persisted + fanned out, no caller resolved (caller will 504).
         }
-        // Stream intermediate frames (text.delta, thinking.*) lack replyTo and
-        // have no caller use today; persistence + sibling fan-out below cover the UI.
-
-        if (sess.chatId) {
-          fanOut(boundChannelId, sess.chatId, apiEvent, frame.connectionId);
+        if (!routedToCaller) {
+          // No matching caller (intermediate stream frame, or message.send without
+          // replyTo, or unknown replyTo). Still persist outbound + fan out so
+          // siblings see whatever the agent emitted; no inbound to pair with.
+          await persistMessageAsync(boundChannelId, apiEvent, 'outbound', sess.userId);
+          if (sess.chatId) {
+            fanOut(boundChannelId, sess.chatId, apiEvent, frame.connectionId);
+          }
         }
         return;
       }
@@ -2195,6 +2279,66 @@ backendWss.on("connection", (ws) => {
   });
 });
 
+/**
+ * ADD-BACK #6: replay outbound rows the client missed while disconnected.
+ *
+ * Client passes lastSeenMessageId on connect; we look up that row's
+ * timestamp and replay every outbound row for the same chatId after it,
+ * emitting them as message.send frames straight to the new socket.
+ *
+ * Best-effort: failures are logged and dropped. Cap replay at 200 rows
+ * to bound startup time on long-disconnected clients.
+ */
+async function resendOutboundSinceLastSeen(channelId, chatId, lastSeenMessageId, ws) {
+  const supabaseUrl = process.env.RELAY_SUPABASE_URL;
+  const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey || !lastSeenMessageId) return;
+
+  const headers = { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` };
+
+  const anchorRes = await fetch(
+    `${supabaseUrl}/pg/rest/v1/cl_messages?channel_id=eq.${encodeURIComponent(channelId)}&message_id=eq.${encodeURIComponent(lastSeenMessageId)}&select=timestamp&limit=1`,
+    { headers }
+  );
+  if (!anchorRes.ok) return;
+  const anchorRows = await anchorRes.json();
+  if (!Array.isArray(anchorRows) || anchorRows.length === 0) return;
+  const anchorTs = anchorRows[0].timestamp;
+
+  const rowsRes = await fetch(
+    `${supabaseUrl}/pg/rest/v1/cl_messages?channel_id=eq.${encodeURIComponent(channelId)}` +
+      `&direction=eq.outbound` +
+      `&timestamp=gt.${encodeURIComponent(anchorTs)}` +
+      `&select=message_id,sender_id,agent_id,content,content_type,thread_id,parent_id,timestamp,meta` +
+      `&order=timestamp.asc&limit=200`,
+    { headers }
+  );
+  if (!rowsRes.ok) return;
+  const rows = await rowsRes.json();
+  if (!Array.isArray(rows) || rows.length === 0) return;
+
+  console.log(`[resync] replaying ${rows.length} outbound rows for ${chatId} after ${lastSeenMessageId}`);
+  for (const r of rows) {
+    if (ws.readyState !== WebSocket.OPEN) break;
+    sendJson(ws, {
+      type: 'message.send',
+      data: {
+        messageId: r.message_id,
+        chatId,
+        senderId: r.sender_id,
+        agentId: r.agent_id,
+        content: r.content,
+        contentType: r.content_type,
+        threadId: r.thread_id || undefined,
+        replyTo: r.parent_id || undefined,
+        timestamp: r.timestamp,
+        meta: r.meta ? (typeof r.meta === 'string' ? JSON.parse(r.meta) : r.meta) : undefined,
+        resync: true,
+      },
+    });
+  }
+}
+
 clientWss.on("connection", (ws, request) => {
   const url = parseRequestUrl(request.url || "/");
   const channelId = normalizeNonEmpty(url.searchParams.get("channelId"));
@@ -2230,6 +2374,9 @@ clientWss.on("connection", (ws, request) => {
     channelId,
     chatId: query.chatId || '',
     userId: authResult.authUser?.senderId,
+    // D6: stash inbound events here keyed by messageId. routeBackendEvent will
+    // persist them when the agent's matching message.send (replyTo) arrives.
+    pendingInbound: new Map(),
   });
 
   sendJson(backend.ws, {
@@ -2239,6 +2386,16 @@ clientWss.on("connection", (ws, request) => {
     authUser: authResult.authUser,
     timestamp: Date.now(),
   });
+
+  // ADD-BACK #6: lastSeenMessageId resync. If the client passed
+  // lastSeenMessageId on the query, replay outbound rows persisted while it
+  // was offline. Single SQL: select rows for this chatId after the row
+  // matching lastSeenMessageId, ordered by timestamp.
+  const lastSeenMessageId = normalizeNonEmpty(url.searchParams.get('lastSeenMessageId'));
+  if (lastSeenMessageId && query.chatId) {
+    resendOutboundSinceLastSeen(channelId, query.chatId, lastSeenMessageId, ws)
+      .catch((err) => console.warn('[resync] lastSeen resend failed:', err.message));
+  }
 
   ws.on("message", async (raw) => {
     if (!checkWsMsgRateLimit(clientRateBucket)) {
@@ -2339,12 +2496,24 @@ clientWss.on("connection", (ws, request) => {
     }
     // ── End @mention trigger ──
 
-    await persistMessageAsync(channelId, event, 'inbound', authResult.authUser?.senderId);
-
-    // Broadcast inbound message to sibling connections (so client B sees what client A sent).
-    // Single fanOut() handles all guards.
-    if (query.chatId && (event?.type === 'message.receive')) {
-      fanOut(channelId, query.chatId, { type: 'message.send', data: { ...event.data, echo: true } }, connectionId);
+    // D6: do NOT eagerly persist inbound or fan out the echo here. Both are
+    // deferred to the ack path in routeBackendEvent so failed/timed-out
+    // requests leave no row and produce no cross-device flash.
+    // Stash the event keyed by messageId for the ack to look up later.
+    const real = realClients.get(connectionId);
+    if (real && event?.type === 'message.receive' && event.data?.messageId) {
+      real.pendingInbound.set(event.data.messageId, {
+        event,
+        senderId: authResult.authUser?.senderId,
+        deadlineAt: Date.now() + 300_000, // 5 min
+      });
+      // Opportunistic GC: drop stale entries when the map grows.
+      if (real.pendingInbound.size > 256) {
+        const now = Date.now();
+        for (const [mid, ent] of real.pendingInbound) {
+          if (ent.deadlineAt <= now) real.pendingInbound.delete(mid);
+        }
+      }
     }
 
     sendJson(currentBackend.ws, {
@@ -2972,7 +3141,12 @@ server.on("request", async (request, response) => {
       // sessionId is the same value we send to the backend as connectionId, so
       // routeBackendEvent's apiSessions.get(frame.connectionId) works directly.
       const sessionId = `api-${channelId}-${chatId}-${agentId}`;
-      const messageId = `api-${Date.now()}-${randomUUID().slice(0, 8)}`;
+      // ADD-BACK #5: caller-provided messageId. Falls back to a generated one
+      // if caller didn't pass one. Same id is used as inbound messageId AND
+      // backend replyTo key, so caller can retry/idempotency-check with it.
+      const messageId = (typeof body.messageId === 'string' && body.messageId.trim())
+        ? body.messageId.trim()
+        : `api-${Date.now()}-${randomUUID().slice(0, 8)}`;
       const ts = Date.now();
 
       // Atomic claim — synchronous get-then-set with no awaits between, so
@@ -3051,12 +3225,37 @@ server.on("request", async (request, response) => {
         },
       };
 
-      // Persist inbound message
-      await persistMessageAsync(channelId, inboundEvent, 'inbound', senderId);
+      // ADD-BACK #7: idempotency check. If we already saw this messageId and
+      // have an outbound reply, return the cached reply with HTTP 200.
+      // If inbound exists but no outbound yet, return 409 (caller can retry).
+      const idem = await checkIdempotency(channelId, messageId);
+      if (idem?.kind === 'cached') {
+        writeJson(response, 200, {
+          ok: true,
+          messageId: idem.outbound.message_id,
+          inboundMessageId: messageId,
+          content: idem.outbound.content || '',
+          agentId: idem.outbound.agent_id || agentId || null,
+          chatId,
+          timestamp: idem.outbound.timestamp || Date.now(),
+          meta: { source: 'api', cached: true },
+        });
+        return;
+      }
+      if (idem?.kind === 'in_flight') {
+        writeJson(response, 409, {
+          ok: false,
+          error: 'duplicate messageId still in flight',
+          inboundMessageId: messageId,
+        });
+        return;
+      }
 
-      // Broadcast inbound to real WS clients on the SAME chatId so chat UI shows it
-      // in real time. Single fanOut() handles all guards (P0-γ F3a).
-      fanOut(channelId, chatId, { type: 'message.send', data: { ...inboundEvent.data, direction: 'inbound', echo: true } });
+      // D6: do NOT persist inbound here. Persistence is deferred to the ack
+      // path (routeBackendEvent's apiSessions branch on message.send) so a
+      // request that times out or errors leaves no row in the DB. Same logic
+      // for the sibling fan-out — both inbound echo and outbound reach real
+      // WS clients only after the agent has actually replied.
 
       // Set up the per-request promise + register inside the session.
       const replyEvents = [];
@@ -3089,11 +3288,15 @@ server.on("request", async (request, response) => {
       // Register the request — keyed by inbound messageId (matches replyTo on the
       // agent's message.send). Concurrent requests on the same session are safe:
       // each waits for its own replyTo (D3 — no FIFO fallback).
+      // D6: stash inboundEvent + senderId so routeBackendEvent can persist it
+      // when the ack arrives.
       sess.requests.set(messageId, {
         resolve: resolveReply,
         reject: rejectReply,
         timer,
         replyEvents,
+        inboundEvent,
+        senderId,
       });
 
       // Forward the inbound event to backend
