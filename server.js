@@ -1010,6 +1010,15 @@ async function handleThreadMarkRead(connectionId, channelId, data, userId) {
     }
 
     sendJson(client.ws, { type: 'thread.mark_read', data: { threadId, lastReadAt: now } });
+
+    // TH-3: notify other devices/clients on this channel that read state changed.
+    // Carry { threadId, readBy:userId, lastReadAt } so subscribers can update unread
+    // badges without re-fetching. Same shape as other thread.updated frames but with
+    // a `readState` flag so clients can disambiguate from full thread.updated payloads.
+    broadcastToChannel(channelId, {
+      type: 'thread.updated',
+      data: { threadId, readState: { userId, lastReadAt: now } },
+    });
   } catch (err) {
     console.error(`[threads] mark_read error: ${err.message}`);
     sendJson(client.ws, { type: 'thread.mark_read', data: { error: 'Internal error' } });
