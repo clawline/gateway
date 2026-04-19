@@ -1052,6 +1052,18 @@ async function handleThreadSearch(connectionId, channelId, data, userId) {
   }
 
   try {
+    // TH-6: refuse search on deleted threads (no useful results, signals intent error
+    // to caller). Allow search on archived/locked — user might want to find old context.
+    const tStatusRes = await fetch(
+      `${supabaseUrl}/pg/rest/v1/cl_threads?id=eq.${encodeURIComponent(threadId)}&select=status&limit=1`,
+      { headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` } }
+    );
+    const tRows = await tStatusRes.json();
+    if (Array.isArray(tRows) && tRows[0]?.status === 'deleted') {
+      sendJson(client.ws, { type: 'thread.search', data: { requestId: data?.requestId, error: 'thread is deleted' } });
+      return;
+    }
+
     // Search messages in this thread using ilike (case-insensitive substring match)
     const encodedQuery = encodeURIComponent(`*${query}*`);
     const searchRes = await fetch(
