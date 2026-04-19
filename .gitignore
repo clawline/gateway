@@ -47,3 +47,5 @@ temp/
 # Misc
 *.tgz
 *.bak
+# E2E test upload artifacts
+media/
