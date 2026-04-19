@@ -2069,8 +2069,6 @@ backendWss.on("connection", (ws) => {
               if (c.virtualConnId === frame.connectionId) { cb = c; break; }
             }
           }
-          const cbCount = global._apiCallbacks?.size || 0;
-          console.log(`[api/chat] message.send replyTo=${replyTo || 'NONE'} cb=${cb ? 'HIT' : 'MISS'} pending=${cbCount}`);
           if (cb) cb.onEvent(apiEvent);
         } else {
           // Non-message.send events (agent.list, agent.selected, history.sync,
