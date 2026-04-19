@@ -2949,7 +2949,13 @@ server.on("request", async (request, response) => {
         return;
       }
 
-      const TIMEOUT_MS = 120_000; // 2 min
+      // Timeout: priority is body.timeout > query.timeout > env > default 300s.
+      // Clamped to [5s, 600s] to prevent silly values + abuse (P0-β).
+      const DEFAULT_TIMEOUT_MS = parseInt(process.env.RELAY_API_CHAT_TIMEOUT_MS || '300000', 10);
+      const MAX_TIMEOUT_MS = 600_000;
+      const MIN_TIMEOUT_MS = 5_000;
+      const requestedTimeout = parseInt(body.timeout, 10) || parseInt(url.searchParams.get('timeout'), 10) || DEFAULT_TIMEOUT_MS;
+      const TIMEOUT_MS = Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, requestedTimeout));
       const POOL_IDLE_MS = 5 * 60_000; // 5 min keep-alive
 
       // Stable virtualConnId derived from channel+chat+agent so the same conversation with the
