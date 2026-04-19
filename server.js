@@ -2059,12 +2059,17 @@ backendWss.on("connection", (ws) => {
       await persistMessageAsync(boundChannelId, frame.event, 'outbound', client.userId);
       sendJson(client.ws, frame.event);
 
-      // Broadcast to sibling connections (same channelId + chatId, different connectionId)
+      // Broadcast to sibling connections (same channelId + chatId, different connectionId).
+      // Skip API virtual connections (ws=null, replies routed via _apiCallbacks instead) and
+      // any sibling whose ws was nulled or is not OPEN.
       if (client.chatId) {
         for (const [siblingId, sibling] of clientConnections) {
-          if (siblingId !== frame.connectionId && sibling.channelId === boundChannelId && sibling.chatId === client.chatId && sibling.ws.readyState === WebSocket.OPEN) {
-            sendJson(sibling.ws, frame.event);
-          }
+          if (siblingId === frame.connectionId) continue;
+          if (!sibling || sibling.isApi || !sibling.ws) continue;
+          if (sibling.channelId !== boundChannelId) continue;
+          if (sibling.chatId !== client.chatId) continue;
+          if (sibling.ws.readyState !== WebSocket.OPEN) continue;
+          sendJson(sibling.ws, frame.event);
         }
       }
       return;
