@@ -193,7 +193,26 @@ const clientWss = new WebSocketServer({ noServer: true, maxPayload: 10485760 });
 
 const backends = new Map();
 const backendPresence = new Map();
-const clientConnections = new Map();
+
+// D1+D2: split client state into two maps so iteration is by-construction safe.
+//
+// realClients — live WebSocket clients. ws is always non-null and OPEN-ish
+// (close handler removes the entry before the socket dies).
+//   connectionId -> { ws, channelId, chatId, userId }
+//
+// apiSessions — pooled HTTP /api/chat sessions. One session per
+// (channelId, chatId, agentId); each session holds the in-flight requests
+// keyed by inbound messageId. No `ws` field — never iterated as a WS.
+//   sessionId -> { sessionId, channelId, chatId, agentId, userId,
+//                  requests: Map<messageId, { resolve, reject, timer, replyEvents }>,
+//                  idleTimer }
+//
+// apiAgentListSessions — short-lived /api/agents probes. Independent of
+// apiSessions because agent.list isn't a message path (no replyTo, no pool).
+//   sessionId -> { channelId, requestId, resolve, reject, timer }
+const realClients = new Map();
+const apiSessions = new Map();
+const apiAgentListSessions = new Map();
 
 let relayConfig = {
   version: 1,
@@ -480,15 +499,12 @@ async function _doUpdateThreadOnNewReply(channelId, threadId, senderId, messageI
  * fan-out — replaces 4 near-identical inline loops in different message paths
  * (D11, reliability-v2 plan).
  *
- * temporary null guard pending D1+D2: API virtual connections currently coexist
- * with real WS in `clientConnections` (ws=null, isApi=true). The `!c.ws || c.isApi`
- * checks below MUST be removed when D1+D2 splits the maps into `realClients` /
- * `apiSessions` — by construction, real WS will never be null.
+ * D1+D2: iterates realClients only — entries are guaranteed to have a non-null
+ * live ws (close handler removes the entry). No isApi / null-ws guards needed.
  */
 function fanOut(channelId, chatId, event, excludeConnectionId) {
-  for (const [id, c] of clientConnections) {
+  for (const [id, c] of realClients) {
     if (id === excludeConnectionId) continue;
-    if (!c || c.isApi || !c.ws) continue; // TEMP: see header note (D1+D2 cleanup)
     if (c.channelId !== channelId) continue;
     if (c.chatId !== chatId) continue;
     if (c.ws.readyState !== WebSocket.OPEN) continue;
@@ -497,15 +513,12 @@ function fanOut(channelId, chatId, event, excludeConnectionId) {
 }
 
 /**
- * Channel-wide broadcast (e.g. thread.updated). Same null guards as fanOut, no
+ * Channel-wide broadcast (e.g. thread.updated). Same scope as fanOut, no
  * chatId filter.
- *
- * temporary null guard pending D1+D2: see fanOut header.
  */
 function broadcastToChannel(channelId, event, excludeConnectionId) {
-  for (const [id, c] of clientConnections) {
+  for (const [id, c] of realClients) {
     if (id === excludeConnectionId) continue;
-    if (!c || c.isApi || !c.ws) continue; // TEMP: see fanOut header (D1+D2 cleanup)
     if (c.channelId !== channelId) continue;
     if (c.ws.readyState !== WebSocket.OPEN) continue;
     sendJson(c.ws, event);
@@ -515,7 +528,7 @@ function broadcastToChannel(channelId, event, excludeConnectionId) {
 async function handleThreadCreate(connectionId, channelId, data, senderId) {
   const supabaseUrl = process.env.RELAY_SUPABASE_URL;
   const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
-  const client = clientConnections.get(connectionId);
+  const client = realClients.get(connectionId);
   if (!client) return;
 
   if (!supabaseUrl || !supabaseKey) {
@@ -582,7 +595,7 @@ async function handleThreadCreate(connectionId, channelId, data, senderId) {
 async function handleThreadGet(connectionId, channelId, data, userId) {
   const supabaseUrl = process.env.RELAY_SUPABASE_URL;
   const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
-  const client = clientConnections.get(connectionId);
+  const client = realClients.get(connectionId);
   if (!client) return;
 
   if (!supabaseUrl || !supabaseKey) {
@@ -706,7 +719,7 @@ async function handleThreadGet(connectionId, channelId, data, userId) {
 async function handleThreadList(connectionId, channelId, data, userId) {
   const supabaseUrl = process.env.RELAY_SUPABASE_URL;
   const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
-  const client = clientConnections.get(connectionId);
+  const client = realClients.get(connectionId);
   if (!client) return;
 
   if (!supabaseUrl || !supabaseKey) {
@@ -837,7 +850,7 @@ async function handleThreadList(connectionId, channelId, data, userId) {
 async function handleThreadUpdate(connectionId, channelId, data, senderId) {
   const supabaseUrl = process.env.RELAY_SUPABASE_URL;
   const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
-  const client = clientConnections.get(connectionId);
+  const client = realClients.get(connectionId);
   if (!client) return;
 
   if (!supabaseUrl || !supabaseKey) {
@@ -936,7 +949,7 @@ async function handleThreadUpdate(connectionId, channelId, data, senderId) {
 async function handleThreadDelete(connectionId, channelId, data, senderId) {
   const supabaseUrl = process.env.RELAY_SUPABASE_URL;
   const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
-  const client = clientConnections.get(connectionId);
+  const client = realClients.get(connectionId);
   if (!client) return;
 
   if (!supabaseUrl || !supabaseKey) {
@@ -1017,7 +1030,7 @@ async function handleThreadDelete(connectionId, channelId, data, senderId) {
 async function handleThreadMarkRead(connectionId, channelId, data, userId) {
   const supabaseUrl = process.env.RELAY_SUPABASE_URL;
   const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
-  const client = clientConnections.get(connectionId);
+  const client = realClients.get(connectionId);
   if (!client) return;
 
   if (!supabaseUrl || !supabaseKey) {
@@ -1086,7 +1099,7 @@ async function handleThreadMarkRead(connectionId, channelId, data, userId) {
 async function handleThreadSearch(connectionId, channelId, data, userId) {
   const supabaseUrl = process.env.RELAY_SUPABASE_URL;
   const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
-  const client = clientConnections.get(connectionId);
+  const client = realClients.get(connectionId);
   if (!client) return;
 
   if (!supabaseUrl || !supabaseKey) {
@@ -1630,12 +1643,12 @@ function closeSocket(ws, code, reason) {
 }
 
 function closeClientConnection(connectionId, code = 1000, reason = "closed") {
-  const entry = clientConnections.get(connectionId);
+  const entry = realClients.get(connectionId);
   if (!entry) {
     return;
   }
 
-  clientConnections.delete(connectionId);
+  realClients.delete(connectionId);
   closeSocket(entry.ws, code, reason);
 }
 
@@ -1653,14 +1666,35 @@ function closeBackendChannel(channelId, code = 1012, reason = "backend replaced"
     lastDisconnectedAt: Date.now(),
   });
 
-  for (const [connectionId, client] of clientConnections.entries()) {
+  for (const [connectionId, client] of realClients.entries()) {
     if (client.channelId !== channelId) {
       continue;
     }
-    clientConnections.delete(connectionId);
+    realClients.delete(connectionId);
     closeSocket(client.ws, code, reason);
   }
+  // Reject any in-flight API requests on this channel so callers fail fast.
+  for (const [sid, sess] of apiSessions.entries()) {
+    if (sess.channelId !== channelId) continue;
+    rejectAllApiRequests(sess, `backend channel closed: ${reason}`);
+    if (sess.idleTimer) clearTimeout(sess.idleTimer);
+    apiSessions.delete(sid);
+  }
+  for (const [sid, w] of apiAgentListSessions.entries()) {
+    if (w.channelId !== channelId) continue;
+    try { w.reject(new Error(`backend channel closed: ${reason}`)); } catch {}
+    if (w.timer) clearTimeout(w.timer);
+    apiAgentListSessions.delete(sid);
+  }
   closeSocket(existing.ws, code, reason);
+}
+
+function rejectAllApiRequests(sess, errMsg) {
+  for (const [, req] of sess.requests) {
+    try { req.reject(new Error(errMsg)); } catch {}
+    if (req.timer) clearTimeout(req.timer);
+  }
+  sess.requests.clear();
 }
 
 function sendJson(ws, payload) {
@@ -1829,7 +1863,7 @@ function getChannelConfig(channelId) {
 
 function getClientCountByChannel(channelId) {
   let count = 0;
-  for (const client of clientConnections.values()) {
+  for (const client of realClients.values()) {
     if (client.channelId === channelId) {
       count += 1;
     }
@@ -1977,93 +2011,85 @@ backendWss.on("connection", (ws) => {
       const evtType = frame.event?.type || 'unknown';
       const evtThreadId = frame.event?.data?.threadId;
       console.log(`[relay] ← backend ${boundChannelId} sending event to client ${frame.connectionId}: ${evtType}${evtThreadId ? ` threadId=${evtThreadId}` : ''}`);
-      const client = clientConnections.get(frame.connectionId);
-      if (!client || client.channelId !== boundChannelId) {
-        // Client disconnected mid-reply — still persist for reconnect sync
-        await persistMessageAsync(boundChannelId, frame.event, 'outbound', null);
+
+      // D1+D2: triage by destination type. Order matters — connectionId is unique
+      // across all three maps (real WS uses UUID, api uses `api-…`, agentlist uses
+      // `api-agentlist-…`), but explicit lookup is clearer than relying on prefixes.
+      const real = realClients.get(frame.connectionId);
+      if (real && real.channelId === boundChannelId) {
+        // ── Auto-thread triggers (backend → real client) ──
+        const evt = frame.event;
+        const evtData = evt?.data || {};
+
+        if (evt?.type === 'message.send' && !evtData.threadId) {
+          const msgId = evtData.messageId || '';
+          // Trigger 1: Subagent delegation — channel sets messageId starting with "delegate-"
+          if (msgId.startsWith('delegate-') && evtData.agentId) {
+            await autoCreateThread(
+              boundChannelId, msgId, evtData.senderId || evtData.agentId,
+              'auto', `Delegation → ${evtData.agentId}`
+            );
+          }
+        }
+        // Trigger 2: ACP thread discovery
+        if (evtData.threadId) {
+          const normalized = normalizeThreadId(evtData.threadId);
+          if (normalized) ensureThreadKnown(boundChannelId, normalized);
+        }
+
+        await persistMessageAsync(boundChannelId, frame.event, 'outbound', real.userId);
+        sendJson(real.ws, frame.event);
+        if (real.chatId) {
+          fanOut(boundChannelId, real.chatId, frame.event, frame.connectionId);
+        }
         return;
       }
 
-      // Virtual API connection — route to per-request callback instead of WS.
-      // Keyed by inbound messageId (via replyTo) so concurrent requests on the same
-      // (channelId, chatId) don't overwrite each other's callbacks (P0-α).
-      if (client.isApi) {
-        // Tag outbound event with source:"api" marker for persistence + client rendering
+      const sess = apiSessions.get(frame.connectionId);
+      if (sess && sess.channelId === boundChannelId) {
         const apiEvent = frame.event;
         if (apiEvent?.data && typeof apiEvent.data === 'object') {
           apiEvent.data = { ...apiEvent.data, meta: { source: 'api', ...(apiEvent.data.meta || {}) } };
         }
-        await persistMessageAsync(boundChannelId, apiEvent, 'outbound', client.userId);
-        // Route message.send by replyTo (the inbound messageId the request used).
+        await persistMessageAsync(boundChannelId, apiEvent, 'outbound', sess.userId);
+
+        // D3: route message.send strictly by replyTo. Agent missing replyTo = no
+        // resolution, the caller's timer trips → 504. No FIFO fallback.
         if (apiEvent?.type === 'message.send') {
           const replyTo = apiEvent?.data?.replyTo;
-          let cb = replyTo ? global._apiCallbacks?.get(replyTo) : undefined;
-          // Fallback: agent occasionally emits message.send WITHOUT replyTo (coalesced
-          // replies, follow-up notes). Route to the oldest pending callback on this
-          // virtualConnId so one of the in-flight requests still gets a reply rather
-          // than hanging to timeout.
-          if (!cb && global._apiCallbacks) {
-            for (const [, c] of global._apiCallbacks) {
-              if (c.virtualConnId === frame.connectionId) { cb = c; break; }
+          if (replyTo) {
+            const req = sess.requests.get(replyTo);
+            if (req) {
+              req.replyEvents.push(apiEvent);
+              clearTimeout(req.timer);
+              req.resolve(req.replyEvents);
+              sess.requests.delete(replyTo);
             }
           }
-          if (cb) cb.onEvent(apiEvent);
-        } else {
-          // Non-message.send events (agent.list, agent.selected, history.sync,
-          // thinking.*, text.delta, etc) lack replyTo. Route to ALL callbacks
-          // tagged for this virtualConnId — they decide internally whether the
-          // event is for them (e.g. handleAgentList filters by requestId).
-          // Without this, /api/agents and other non-chat APIs cannot get replies.
-          if (global._apiCallbacks) {
-            for (const [, c] of global._apiCallbacks) {
-              if (c.virtualConnId === frame.connectionId) c.onEvent(apiEvent);
-            }
-          }
+          // else: persisted + fanned out, no caller resolved (caller will 504).
         }
-        // Sibling fan-out: real WS clients on the same chatId should also see API
-        // outbound (so a Web user watching the same conversation sees the agent's
-        // reply to an API call) — P0-γ F3b. Single fanOut() handles all guards.
-        if (client.chatId) {
-          fanOut(boundChannelId, client.chatId, apiEvent, frame.connectionId);
+        // Stream intermediate frames (text.delta, thinking.*) lack replyTo and
+        // have no caller use today; persistence + sibling fan-out below cover the UI.
+
+        if (sess.chatId) {
+          fanOut(boundChannelId, sess.chatId, apiEvent, frame.connectionId);
         }
         return;
       }
 
-      // ── Auto-thread triggers (backend → client) ──
-      const evt = frame.event;
-      const evtData = evt?.data || {};
-
-      if (evt?.type === 'message.send' && !evtData.threadId) {
-        const msgId = evtData.messageId || '';
-
-        // Trigger 1: Subagent delegation — channel sets messageId starting with "delegate-"
-        // Create thread with delegate echo as parent — do NOT set threadId on the message,
-        // because parent messages must stay visible in the main chat.
-        if (msgId.startsWith('delegate-') && evtData.agentId) {
-          await autoCreateThread(
-          boundChannelId, msgId, evtData.senderId || evtData.agentId,
-          'auto', `Delegation → ${evtData.agentId}`
-        );
+      const waiter = apiAgentListSessions.get(frame.connectionId);
+      if (waiter && waiter.channelId === boundChannelId) {
+        const e = frame.event;
+        if (e?.type === 'agent.list' && e?.data?.requestId === waiter.requestId) {
+          clearTimeout(waiter.timer);
+          waiter.resolve(e.data.agents || []);
+          apiAgentListSessions.delete(frame.connectionId);
         }
+        return;
       }
 
-      // Trigger 2: ACP thread discovery — message carries threadId from ACP session
-      if (evtData.threadId) {
-        const normalized = normalizeThreadId(evtData.threadId);
-        if (normalized) {
-          ensureThreadKnown(boundChannelId, normalized);
-        }
-      }
-      // ── End auto-thread triggers ──
-
-      await persistMessageAsync(boundChannelId, frame.event, 'outbound', client.userId);
-      sendJson(client.ws, frame.event);
-
-      // Broadcast to sibling connections (same channelId + chatId, different connectionId).
-      // Single fanOut() handles all guards.
-      if (client.chatId) {
-        fanOut(boundChannelId, client.chatId, frame.event, frame.connectionId);
-      }
+      // No live destination — persist for reconnect sync (D6 will use this).
+      await persistMessageAsync(boundChannelId, frame.event, 'outbound', null);
       return;
     }
 
@@ -2074,52 +2100,48 @@ backendWss.on("connection", (ws) => {
     }
 
     if (frame?.type === "relay.server.reject") {
-      const client = clientConnections.get(frame.connectionId);
-      if (!client || client.channelId !== boundChannelId) {
+      const real = realClients.get(frame.connectionId);
+      if (real && real.channelId === boundChannelId) {
+        realClients.delete(frame.connectionId);
+        closeSocket(real.ws, frame.code || 1008, frame.message || "rejected");
         return;
       }
-      clientConnections.delete(frame.connectionId);
-      // API virtual conn (ws=null): notify any pending /api/chat callbacks via onError
-      // so the HTTP request gets a fast 502 instead of waiting for timeout (P1-γ).
-      if (client.isApi) {
-        if (global._apiCallbacks) {
-          for (const [mid, cb] of global._apiCallbacks) {
-            // virtualConnId encodes channel+chat; we can't cleanly cross-walk
-            // messageId → virtualConnId here, so reject all callbacks tagged for
-            // this channel/chat. The pool is keyed by virtualConnId; iterate cb
-            // entries paired in pool meta if needed. For now reject everything
-            // matching this connectionId via metadata stamped at register time.
-            if (cb.virtualConnId === frame.connectionId) {
-              try { cb.onError(new Error(`agent rejected: ${frame.message || 'unknown'}`)); } catch {}
-              global._apiCallbacks.delete(mid);
-            }
-          }
-        }
+      const sess = apiSessions.get(frame.connectionId);
+      if (sess && sess.channelId === boundChannelId) {
+        rejectAllApiRequests(sess, `agent rejected: ${frame.message || 'unknown'}`);
+        if (sess.idleTimer) clearTimeout(sess.idleTimer);
+        apiSessions.delete(frame.connectionId);
         return;
       }
-      closeSocket(client.ws, frame.code || 1008, frame.message || "rejected");
+      const waiter = apiAgentListSessions.get(frame.connectionId);
+      if (waiter && waiter.channelId === boundChannelId) {
+        clearTimeout(waiter.timer);
+        try { waiter.reject(new Error(`agent rejected: ${frame.message || 'unknown'}`)); } catch {}
+        apiAgentListSessions.delete(frame.connectionId);
+      }
       return;
     }
 
     if (frame?.type === "relay.server.close") {
-      const client = clientConnections.get(frame.connectionId);
-      if (!client || client.channelId !== boundChannelId) {
+      const real = realClients.get(frame.connectionId);
+      if (real && real.channelId === boundChannelId) {
+        realClients.delete(frame.connectionId);
+        closeSocket(real.ws, frame.code || 1000, frame.reason || "closed");
         return;
       }
-      clientConnections.delete(frame.connectionId);
-      // Same null-guard as relay.server.reject (above) — API virtual conn has ws=null.
-      if (client.isApi) {
-        if (global._apiCallbacks) {
-          for (const [mid, cb] of global._apiCallbacks) {
-            if (cb.virtualConnId === frame.connectionId) {
-              try { cb.onError(new Error(`agent closed: ${frame.reason || 'closed'}`)); } catch {}
-              global._apiCallbacks.delete(mid);
-            }
-          }
-        }
+      const sess = apiSessions.get(frame.connectionId);
+      if (sess && sess.channelId === boundChannelId) {
+        rejectAllApiRequests(sess, `agent closed: ${frame.reason || 'closed'}`);
+        if (sess.idleTimer) clearTimeout(sess.idleTimer);
+        apiSessions.delete(frame.connectionId);
         return;
       }
-      closeSocket(client.ws, frame.code || 1000, frame.reason || "closed");
+      const waiter = apiAgentListSessions.get(frame.connectionId);
+      if (waiter && waiter.channelId === boundChannelId) {
+        clearTimeout(waiter.timer);
+        try { waiter.reject(new Error(`agent closed: ${frame.reason || 'closed'}`)); } catch {}
+        apiAgentListSessions.delete(frame.connectionId);
+      }
     }
   });
 
@@ -2138,21 +2160,25 @@ backendWss.on("connection", (ws) => {
       ...presence,
       lastDisconnectedAt: Date.now(),
     });
-    for (const [connectionId, client] of clientConnections.entries()) {
+    for (const [connectionId, client] of realClients.entries()) {
       if (client.channelId !== boundChannelId) {
         continue;
       }
-      clientConnections.delete(connectionId);
+      realClients.delete(connectionId);
       closeSocket(client.ws, 1012, "backend disconnected");
     }
-    // Clean up API connection pool entries for this channel
-    if (global._apiConnPool) {
-      for (const [connId, entry] of global._apiConnPool.entries()) {
-        if (entry.channelId === boundChannelId) {
-          if (entry.idleTimer) clearTimeout(entry.idleTimer);
-          global._apiConnPool.delete(connId);
-        }
-      }
+    // D1+D2: drain in-flight API state for this channel.
+    for (const [sid, sess] of apiSessions.entries()) {
+      if (sess.channelId !== boundChannelId) continue;
+      rejectAllApiRequests(sess, 'backend disconnected');
+      if (sess.idleTimer) clearTimeout(sess.idleTimer);
+      apiSessions.delete(sid);
+    }
+    for (const [sid, w] of apiAgentListSessions.entries()) {
+      if (w.channelId !== boundChannelId) continue;
+      try { w.reject(new Error('backend disconnected')); } catch {}
+      if (w.timer) clearTimeout(w.timer);
+      apiAgentListSessions.delete(sid);
     }
     console.log(`[relay] backend disconnected: ${boundChannelId}`);
   });
@@ -2192,7 +2218,7 @@ clientWss.on("connection", (ws, request) => {
   const query = extractRelayQuery(channelConfig, url);
   const clientRateBucket = { tokens: WS_MSG_RATE_LIMIT, lastRefill: Date.now() };
 
-  clientConnections.set(connectionId, {
+  realClients.set(connectionId, {
     ws,
     channelId,
     chatId: query.chatId || '',
@@ -2323,7 +2349,7 @@ clientWss.on("connection", (ws, request) => {
   });
 
   ws.on("close", (code, reason) => {
-    clientConnections.delete(connectionId);
+    realClients.delete(connectionId);
     const currentBackend = backends.get(channelId);
     if (!currentBackend || currentBackend.ws.readyState !== WebSocket.OPEN) {
       return;
@@ -2352,7 +2378,7 @@ async function handleAdminState(response) {
     channels: listChannels(),
     stats: {
       backendCount: backends.size,
-      clientCount: clientConnections.size,
+      clientCount: realClients.size,
     },
     timestamp: Date.now(),
   });
@@ -2383,39 +2409,25 @@ async function handleAgentList(response) {
       const backend = backends.get(ch.channelId);
       if (!backend || backend.ws.readyState !== 1 /* OPEN */) return base;
 
-      // Build a temporary virtual connection to receive the agent.list response
+      // D2: dedicated apiAgentListSessions map — agent.list isn't a message path,
+      // doesn't pool, and never receives replyTo. Keeping it out of apiSessions
+      // keeps both data structures small and single-purpose.
       const virtualConnId = `api-agentlist-${randomUUID()}`;
       const requestId = `agentlist-${Date.now()}`;
 
       try {
         const agents = await new Promise((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error('timeout')), 5000);
+          const timer = setTimeout(() => {
+            apiAgentListSessions.delete(virtualConnId);
+            reject(new Error('timeout'));
+          }, 5000);
 
-          // Register virtual client so relay.server.event routes here
-          if (!global._apiCallbacks) global._apiCallbacks = new Map();
-          global._apiCallbacks.set(virtualConnId, {
-            // Stamp virtualConnId so the boundary router can find this callback
-            // by connection (agent.list events lack replyTo, so the messageId-keyed
-            // dispatch from F1 won't match — see backend.event handler isApi branch).
-            virtualConnId,
-            onEvent(evt) {
-              if (evt?.type === 'agent.list' && evt?.data?.requestId === requestId) {
-                clearTimeout(timer);
-                resolve(evt.data.agents || []);
-              }
-            },
-            onError(err) {
-              clearTimeout(timer);
-              reject(err);
-            },
-          });
-
-          clientConnections.set(virtualConnId, {
-            ws: null,
+          apiAgentListSessions.set(virtualConnId, {
             channelId: ch.channelId,
-            chatId: `api-agentlist`,
-            userId: 'api',
-            isApi: true,
+            requestId,
+            resolve,
+            reject,
+            timer,
           });
 
           // Open virtual connection to backend
@@ -2442,8 +2454,7 @@ async function handleAgentList(response) {
       } catch {
         return { ...base, agents: [], error: 'agent list fetch failed or timed out' };
       } finally {
-        global._apiCallbacks?.delete(virtualConnId);
-        clientConnections.delete(virtualConnId);
+        apiAgentListSessions.delete(virtualConnId);
         // Close virtual connection on backend
         if (backend.ws.readyState === 1) {
           sendJson(backend.ws, {
@@ -2598,7 +2609,7 @@ server.on("request", async (request, response) => {
     writeJson(response, 200, {
       ok: true,
       backendCount: backends.size,
-      clientCount: clientConnections.size,
+      clientCount: realClients.size,
       channels: listChannels().map((channel) => ({
         channelId: channel.channelId,
         label: channel.label,
@@ -2943,24 +2954,42 @@ server.on("request", async (request, response) => {
       const TIMEOUT_MS = Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, requestedTimeout));
       const POOL_IDLE_MS = 5 * 60_000; // 5 min keep-alive
 
-      // Stable virtualConnId derived from channel+chat+agent so the same conversation with the
-      // same agent reuses the same backend connection, preserving agent context across multiple
-      // API calls. agentId is included to avoid cross-agent connection sharing: if multiple agents
-      // on the same channel receive parallel API calls, they must each have their own virtual
-      // connection so that channel-side agent isolation does not buffer/discard replies.
-      const virtualConnId = `api-${channelId}-${chatId}-${agentId}`;
+      // Stable sessionId derived from channel+chat+agent so the same conversation
+      // with the same agent reuses the same backend connection, preserving agent
+      // context across multiple API calls. agentId is included to avoid cross-agent
+      // connection sharing: if multiple agents on the same channel receive parallel
+      // API calls, they must each have their own session so that channel-side agent
+      // isolation does not buffer/discard replies.
+      //
+      // D1+D2: pooled apiSessions per (channelId, chatId, agentId).
+      // sessionId is the same value we send to the backend as connectionId, so
+      // routeBackendEvent's apiSessions.get(frame.connectionId) works directly.
+      const sessionId = `api-${channelId}-${chatId}-${agentId}`;
       const messageId = `api-${Date.now()}-${randomUUID().slice(0, 8)}`;
       const ts = Date.now();
 
-      // Pool: reuse existing virtual connections instead of open/close every request.
-      if (!global._apiConnPool) global._apiConnPool = new Map();
-      const pool = global._apiConnPool;
-
-      // Clear any pending idle-close timer — we're actively using this connection
-      const existing = pool.get(virtualConnId);
-      if (existing?.idleTimer) {
-        clearTimeout(existing.idleTimer);
-        existing.idleTimer = null;
+      // Atomic claim — synchronous get-then-set with no awaits between, so
+      // concurrent requests on the same sessionId either reuse an existing
+      // session or all observe the same just-created one (no last-writer-wins).
+      let sess = apiSessions.get(sessionId);
+      let isNewSession = false;
+      if (!sess) {
+        sess = {
+          sessionId,
+          channelId,
+          chatId,
+          agentId,
+          userId: senderId,
+          requests: new Map(),
+          idleTimer: null,
+          opening: null, // Promise resolved once relay.client.open + 50ms settle is done
+        };
+        apiSessions.set(sessionId, sess);
+        isNewSession = true;
+      }
+      if (sess.idleTimer) {
+        clearTimeout(sess.idleTimer);
+        sess.idleTimer = null;
       }
 
       // Optional: route the message into a specific thread. If provided, validate it
@@ -3022,7 +3051,7 @@ server.on("request", async (request, response) => {
       // in real time. Single fanOut() handles all guards (P0-γ F3a).
       fanOut(channelId, chatId, { type: 'message.send', data: { ...inboundEvent.data, direction: 'inbound', echo: true } });
 
-      // Register virtual connection so backend replies can be routed here
+      // Set up the per-request promise + register inside the session.
       const replyEvents = [];
       let resolveReply;
       let rejectReply;
@@ -3030,65 +3059,40 @@ server.on("request", async (request, response) => {
         resolveReply = res;
         rejectReply = rej;
       });
-
-      // Timeout guard
       const timer = setTimeout(() => rejectReply(new Error('timeout')), TIMEOUT_MS);
 
-      // Register per-request callback so relay.server.event can route the reply here.
-      // Keyed by messageId (the inbound message id) — matches via replyTo on the agent's
-      // message.send. This makes concurrent requests on the same (channel, chat) safe (P0-α).
-      // Stamp virtualConnId so reject/close handlers (P1-γ) can fail-fast all pending
-      // callbacks for a given API conn without scanning HTTP request scopes.
-      if (!global._apiCallbacks) global._apiCallbacks = new Map();
-      global._apiCallbacks.set(messageId, {
-        virtualConnId,
-        onEvent(evt) {
-          replyEvents.push(evt);
-          // Resolve on any message.send the dispatcher routed to us. The router
-          // matches by replyTo when set, falls back to FIFO by virtualConnId
-          // when replyTo is missing — either way, message.send arriving here is
-          // intended for THIS request.
-          if (evt?.type === 'message.send') {
-            clearTimeout(timer);
-            resolveReply(replyEvents);
-          }
-        },
-        onError(err) {
-          clearTimeout(timer);
-          rejectReply(err);
-        },
-      });
-
-      const isNewConn = !pool.has(virtualConnId);
-
-      // Register virtual client in clientConnections so frame routing works
-      if (isNewConn) {
-        clientConnections.set(virtualConnId, {
-          ws: null,
-          channelId,
-          chatId,
-          userId: senderId,
-          isApi: true,
-        });
-        pool.set(virtualConnId, { channelId, chatId, agentId, idleTimer: null });
-
-        // Send open frame to backend (only once per stable connection)
-        sendJson(backend.ws, {
-          type: 'relay.client.open',
-          connectionId: virtualConnId,
-          query: { chatId, agentId: agentId || null, token: null },
-          authUser: { senderId, chatId, allowAgents: agentId ? [agentId] : undefined },
-          timestamp: ts,
-        });
-
-        // Small delay for backend to register the connection, then send message
-        await new Promise((r) => setTimeout(r, 50));
+      // Concurrent requests share `sess.opening` — only the first creator opens
+      // the backend connection; followers await the same promise.
+      if (isNewSession) {
+        sess.opening = (async () => {
+          sendJson(backend.ws, {
+            type: 'relay.client.open',
+            connectionId: sessionId,
+            query: { chatId, agentId: agentId || null, token: null },
+            authUser: { senderId, chatId, allowAgents: agentId ? [agentId] : undefined },
+            timestamp: ts,
+          });
+          await new Promise((r) => setTimeout(r, 50));
+        })();
       }
+      if (sess.opening) {
+        await sess.opening;
+      }
+
+      // Register the request — keyed by inbound messageId (matches replyTo on the
+      // agent's message.send). Concurrent requests on the same session are safe:
+      // each waits for its own replyTo (D3 — no FIFO fallback).
+      sess.requests.set(messageId, {
+        resolve: resolveReply,
+        reject: rejectReply,
+        timer,
+        replyEvents,
+      });
 
       // Forward the inbound event to backend
       sendJson(backend.ws, {
         type: 'relay.client.event',
-        connectionId: virtualConnId,
+        connectionId: sessionId,
         event: inboundEvent,
         timestamp: ts,
       });
@@ -3098,16 +3102,14 @@ server.on("request", async (request, response) => {
       try {
         replyEvts = await replyPromise;
       } finally {
-        global._apiCallbacks.delete(messageId);
-        // Schedule idle close — don't close immediately so context is preserved for next call
-        const poolEntry = pool.get(virtualConnId);
-        if (poolEntry) {
-          poolEntry.idleTimer = setTimeout(() => {
-            pool.delete(virtualConnId);
-            clientConnections.delete(virtualConnId);
+        sess.requests.delete(messageId);
+        // Schedule idle close — preserve context for next call on same session.
+        if (sess.requests.size === 0) {
+          sess.idleTimer = setTimeout(() => {
+            apiSessions.delete(sessionId);
             sendJson(backend.ws, {
               type: 'relay.client.close',
-              connectionId: virtualConnId,
+              connectionId: sessionId,
               code: 1000,
               reason: 'api idle timeout',
               timestamp: Date.now(),
