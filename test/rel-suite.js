@@ -124,33 +124,32 @@ async function rel02() {
   // Wait briefly for any in-flight persists to settle
   await sleep(2000);
 
-  // Ghost check: every ackInboundId must exist in DB; nothing else should.
+  // Ghost check (post-D6-fix): inbound persistence is unconditional once
+  // the request is accepted. So total inbound rows in the channel must equal
+  // (ack + err) — every accepted request leaves a row, no row exists without
+  // a corresponding response.
   let ghosts = 0, missing = 0;
   for (const id of ackInboundIds) {
     const c = await dbCount(CHANNEL_ID, id, 'inbound');
     if (c !== 1) missing++;
   }
-  // Ghost = a row whose messageId we never saw in either ack or err return.
-  // Total inbound rows in channel must equal ack count.
   const totalRowsRes = await fetch(
     `${SUPA_URL}/pg/rest/v1/cl_messages?channel_id=eq.${CHANNEL_ID}&direction=eq.inbound&select=id`,
     { headers: { apikey: SUPA_KEY, authorization: `Bearer ${SUPA_KEY}` } }
   );
   const totalRows = (await totalRowsRes.json()).length;
-  ghosts = Math.max(0, totalRows - ack);
+  // Every request that reached the gateway and passed validation persists
+  // inbound, even if it later errors. So expected total = N (= ack + err).
+  ghosts = Math.max(0, totalRows - (ack + err));
 
-  const ok = (ack + err === N) && missing === 0;
-  // Note: `ghosts` may be > 0 in current implementation (D6 not yet done — eager persist
-  // means even errored requests left rows). For now we report the number; PASS criteria is
-  // (1) total accounted (ack+err=N) and (2) all acked rows persisted (no missing).
-  // After D6 lands we'll tighten ghosts === 0.
+  const ok = (ack + err === N) && missing === 0 && ghosts === 0;
   const elapsed = ((Date.now() - startTs) / 1000).toFixed(1);
   if (ok) {
     record('REL-02', 'PASS',
-      `${N} parallel, ack=${ack} err=${err} missing=${missing} ghost-rows=${ghosts} (pre-D6 ghosts expected) elapsed=${elapsed}s`);
+      `${N} parallel, ack=${ack} err=${err} missing=${missing} ghost-rows=${ghosts} elapsed=${elapsed}s`);
   } else {
     record('REL-02', 'FAIL',
-      `${N} parallel, ack=${ack} err=${err} missing=${missing} ghost-rows=${ghosts}`);
+      `${N} parallel, ack=${ack} err=${err} missing=${missing} ghost-rows=${ghosts} totalRows=${totalRows}`);
   }
 }
 

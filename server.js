@@ -2115,26 +2115,6 @@ backendWss.on("connection", (ws) => {
           if (normalized) ensureThreadKnown(boundChannelId, normalized);
         }
 
-        // D6: if this is a message.send acking a stashed inbound, persist the
-        // inbound first so cl_messages contains both rows in the right order,
-        // then fan the inbound echo to siblings (sibling tabs see what their
-        // peer sent only after the agent has actually replied).
-        if (evt?.type === 'message.send' && evtData.replyTo && real.pendingInbound) {
-          const stash = real.pendingInbound.get(evtData.replyTo);
-          if (stash) {
-            await persistMessageAsync(boundChannelId, stash.event, 'inbound', stash.senderId);
-            if (real.chatId) {
-              fanOut(
-                boundChannelId,
-                real.chatId,
-                { type: 'message.send', data: { ...stash.event.data, echo: true } },
-                frame.connectionId,
-              );
-            }
-            real.pendingInbound.delete(evtData.replyTo);
-          }
-        }
-
         await persistMessageAsync(boundChannelId, frame.event, 'outbound', real.userId);
         sendJson(real.ws, frame.event);
         if (real.chatId) {
@@ -2152,28 +2132,16 @@ backendWss.on("connection", (ws) => {
 
         // D3: route message.send strictly by replyTo. Agent missing replyTo = no
         // resolution, the caller's timer trips → 504. No FIFO fallback.
-        // D6: ack-then-persist — on a routable message.send we persist inbound
-        // (from req.inboundEvent) THEN outbound, then fan out the inbound echo
-        // to siblings followed by the outbound. Both reach the DB and other
-        // clients only after the agent has actually replied. Untimely / failed
-        // requests leave zero rows.
+        // Inbound was already persisted + fanned out at /api/chat entry, so
+        // here we only handle the outbound ack: persist outbound, fanOut to
+        // siblings, resolve the waiting caller.
         let routedToCaller = false;
         if (apiEvent?.type === 'message.send') {
           const replyTo = apiEvent?.data?.replyTo;
           if (replyTo) {
             const req = sess.requests.get(replyTo);
             if (req) {
-              if (req.inboundEvent) {
-                await persistMessageAsync(boundChannelId, req.inboundEvent, 'inbound', req.senderId);
-              }
               await persistMessageAsync(boundChannelId, apiEvent, 'outbound', sess.userId);
-              if (sess.chatId && req.inboundEvent) {
-                fanOut(
-                  boundChannelId,
-                  sess.chatId,
-                  { type: 'message.send', data: { ...req.inboundEvent.data, direction: 'inbound', echo: true } },
-                );
-              }
               if (sess.chatId) {
                 fanOut(boundChannelId, sess.chatId, apiEvent, frame.connectionId);
               }
@@ -2187,8 +2155,8 @@ backendWss.on("connection", (ws) => {
         }
         if (!routedToCaller) {
           // No matching caller (intermediate stream frame, or message.send without
-          // replyTo, or unknown replyTo). Still persist outbound + fan out so
-          // siblings see whatever the agent emitted; no inbound to pair with.
+          // replyTo, or unknown replyTo). Persist outbound + fan out so siblings
+          // see whatever the agent emitted.
           await persistMessageAsync(boundChannelId, apiEvent, 'outbound', sess.userId);
           if (sess.chatId) {
             fanOut(boundChannelId, sess.chatId, apiEvent, frame.connectionId);
@@ -2208,7 +2176,7 @@ backendWss.on("connection", (ws) => {
         return;
       }
 
-      // No live destination — persist for reconnect sync (D6 will use this).
+      // No live destination — persist for reconnect sync (lastSeen replay path).
       await persistMessageAsync(boundChannelId, frame.event, 'outbound', null);
       return;
     }
@@ -2403,9 +2371,6 @@ clientWss.on("connection", (ws, request) => {
     channelId,
     chatId: query.chatId || '',
     userId: authResult.authUser?.senderId,
-    // D6: stash inbound events here keyed by messageId. routeBackendEvent will
-    // persist them when the agent's matching message.send (replyTo) arrives.
-    pendingInbound: new Map(),
   });
 
   sendJson(backend.ws, {
@@ -2525,23 +2490,29 @@ clientWss.on("connection", (ws, request) => {
     }
     // ── End @mention trigger ──
 
-    // D6: do NOT eagerly persist inbound or fan out the echo here. Both are
-    // deferred to the ack path in routeBackendEvent so failed/timed-out
-    // requests leave no row and produce no cross-device flash.
-    // Stash the event keyed by messageId for the ack to look up later.
-    const real = realClients.get(connectionId);
-    if (real && event?.type === 'message.receive' && event.data?.messageId) {
-      real.pendingInbound.set(event.data.messageId, {
-        event,
-        senderId: authResult.authUser?.senderId,
-        deadlineAt: Date.now() + 300_000, // 5 min
-      });
-      // Opportunistic GC: drop stale entries when the map grows.
-      if (real.pendingInbound.size > 256) {
-        const now = Date.now();
-        for (const [mid, ent] of real.pendingInbound) {
-          if (ent.deadlineAt <= now) real.pendingInbound.delete(mid);
-        }
+    // Inbound persistence invariant (REL-06): persist + fan-out the user's
+    // message immediately on accept. Independent of whether the agent later
+    // replies. If DB write fails, refuse the message with an error event so
+    // the client can retry — never silently forward an unpersisted message.
+    if (event?.type === 'message.receive') {
+      const senderId = authResult.authUser?.senderId;
+      const inboundPersisted = await persistMessageAsync(
+        channelId, event, 'inbound', senderId
+      );
+      if (!inboundPersisted) {
+        sendJson(ws, {
+          type: 'error',
+          data: { code: 'PERSIST_FAILED', message: 'failed to persist inbound message' },
+        });
+        return;
+      }
+      const real = realClients.get(connectionId);
+      if (real?.chatId) {
+        fanOut(
+          channelId, real.chatId,
+          { type: 'message.send', data: { ...event.data, echo: true } },
+          connectionId,
+        );
       }
     }
 
@@ -3280,11 +3251,25 @@ server.on("request", async (request, response) => {
         return;
       }
 
-      // D6: do NOT persist inbound here. Persistence is deferred to the ack
-      // path (routeBackendEvent's apiSessions branch on message.send) so a
-      // request that times out or errors leaves no row in the DB. Same logic
-      // for the sibling fan-out — both inbound echo and outbound reach real
-      // WS clients only after the agent has actually replied.
+      // Inbound persistence invariant (REL-06): a user message is a physical
+      // fact. Persist it the moment we accept it, regardless of whether the
+      // agent later acks/errors/times out. DB write failure → 500 (do not
+      // silently swallow; the caller must know).
+      const inboundPersisted = await persistMessageAsync(
+        channelId, inboundEvent, 'inbound', senderId
+      );
+      if (!inboundPersisted) {
+        writeJson(response, 500, { ok: false, error: 'failed to persist inbound message' });
+        return;
+      }
+      // Echo inbound to sibling clients on this chatId so other tabs see the
+      // user's own message immediately, independent of the agent reply.
+      if (chatId) {
+        fanOut(
+          channelId, chatId,
+          { type: 'message.send', data: { ...inboundEvent.data, direction: 'inbound', echo: true } },
+        );
+      }
 
       // Set up the per-request promise + register inside the session.
       const replyEvents = [];
@@ -3317,15 +3302,11 @@ server.on("request", async (request, response) => {
       // Register the request — keyed by inbound messageId (matches replyTo on the
       // agent's message.send). Concurrent requests on the same session are safe:
       // each waits for its own replyTo (D3 — no FIFO fallback).
-      // D6: stash inboundEvent + senderId so routeBackendEvent can persist it
-      // when the ack arrives.
       sess.requests.set(messageId, {
         resolve: resolveReply,
         reject: rejectReply,
         timer,
         replyEvents,
-        inboundEvent,
-        senderId,
       });
 
       // Forward the inbound event to backend
