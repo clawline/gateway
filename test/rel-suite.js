@@ -78,6 +78,80 @@ async function apiChat(message, opts = {}) {
   });
 }
 
+// SSE client. Returns { events, status, abort, done }.
+// `events` is appended to as frames arrive. `done` resolves on stream end.
+async function apiChatSSE(message, opts = {}) {
+  const ac = new AbortController();
+  const events = [];
+  let resolveDone, rejectDone;
+  const done = new Promise((res, rej) => { resolveDone = res; rejectDone = rej; });
+
+  const body = JSON.stringify({
+    message,
+    channelId: CHANNEL_ID,
+    agentId: opts.agentId || 'main',
+    senderId: opts.senderId || 'rel-user',
+    chatId: opts.chatId || `rel-${Date.now()}`,
+    ...(opts.messageId ? { messageId: opts.messageId } : {}),
+  });
+
+  const res = await fetch(`${GW}/api/chat`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      accept: 'text/event-stream',
+      authorization: `Bearer ${USER_TOKEN}`,
+    },
+    body,
+    signal: ac.signal,
+  });
+
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => '');
+    rejectDone(new Error(`SSE handshake failed: ${res.status} ${text}`));
+    return { status: res.status, events, abort: () => ac.abort(), done };
+  }
+
+  (async () => {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    try {
+      while (true) {
+        const { value, done: streamDone } = await reader.read();
+        if (streamDone) break;
+        buf += decoder.decode(value, { stream: true });
+        // Split on SSE record boundary (blank line)
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const record = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          if (!record.trim() || record.startsWith(':')) continue; // ignore comments / heartbeats
+          let evt = 'message';
+          let dataLines = [];
+          for (const line of record.split('\n')) {
+            if (line.startsWith('event:')) evt = line.slice(6).trim();
+            else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+          }
+          let data = null;
+          if (dataLines.length) {
+            try { data = JSON.parse(dataLines.join('\n')); } catch { data = dataLines.join('\n'); }
+          }
+          events.push({ event: evt, data });
+          if (evt === 'done' || evt === 'error') {
+            // Allow the loop to drain naturally
+          }
+        }
+      }
+    } catch (e) {
+      if (e.name !== 'AbortError') rejectDone(e);
+    }
+    resolveDone(events);
+  })();
+
+  return { status: res.status, events, abort: () => ac.abort(), done };
+}
+
 // ---------- REL-01 ----------
 async function rel01() {
   await dbCleanup(CHANNEL_ID);
@@ -273,6 +347,108 @@ async function rel06c() {
   await rel06Once('c', 'drop', { expectStatuses: [504] });
 }
 
+// ---------- REL-07: SSE streaming ----------
+// SSE replaces the synchronous HTTP path's 600s hard cap with an event-driven
+// stream. Verify: (a) accepted+delta+done sequence; (b) long task with many
+// deltas finishes without server-side timeout; (c) agent error → SSE error
+// event AND inbound row still in DB; (d) caller disconnect doesn't crash GW.
+
+async function rel07a() {
+  await dbCleanup(CHANNEL_ID);
+  const messageId = `rel-07a-${Date.now()}`;
+  const stream = await apiChatSSE('REL-07a', {
+    chatId: `rel-07-stream-a-${Date.now()}`,
+    messageId,
+  });
+  if (stream.status !== 200) {
+    return record('REL-07a', 'FAIL', `SSE handshake status=${stream.status}`);
+  }
+  await stream.done;
+  const names = stream.events.map((e) => e.event);
+  const accepted = stream.events.find((e) => e.event === 'accepted');
+  const deltas = stream.events.filter((e) => e.event === 'delta');
+  const done = stream.events.find((e) => e.event === 'done');
+  if (
+    accepted?.data?.inboundMessageId === messageId &&
+    deltas.length >= 1 &&
+    done?.data?.replyMessageId
+  ) {
+    record('REL-07a', 'PASS', `events=[${names.join(',')}] deltas=${deltas.length}`);
+  } else {
+    record('REL-07a', 'FAIL', `unexpected sequence: ${JSON.stringify(names)} accepted=${!!accepted} deltas=${deltas.length} done=${!!done}`);
+  }
+}
+
+async function rel07b() {
+  await dbCleanup(CHANNEL_ID);
+  const messageId = `rel-07b-${Date.now()}`;
+  const startMs = Date.now();
+  const stream = await apiChatSSE('REL-07b long', {
+    chatId: `rel-07-long-b-${Date.now()}`,
+    messageId,
+  });
+  if (stream.status !== 200) {
+    return record('REL-07b', 'FAIL', `SSE handshake status=${stream.status}`);
+  }
+  await stream.done;
+  const elapsed = Date.now() - startMs;
+  const deltas = stream.events.filter((e) => e.event === 'delta');
+  const done = stream.events.find((e) => e.event === 'done');
+  if (deltas.length >= 10 && done && elapsed >= 10_000) {
+    record('REL-07b', 'PASS', `${deltas.length} deltas over ${(elapsed / 1000).toFixed(1)}s, no server-side cap`);
+  } else {
+    record('REL-07b', 'FAIL', `deltas=${deltas.length} done=${!!done} elapsed=${elapsed}ms`);
+  }
+}
+
+async function rel07c() {
+  await dbCleanup(CHANNEL_ID);
+  const messageId = `rel-07c-${Date.now()}`;
+  // Reuse rel-06-reject mock-backend mode — agent sends relay.server.reject.
+  const stream = await apiChatSSE('REL-07c', {
+    chatId: `rel-06-reject-07c-${Date.now()}`,
+    messageId,
+  });
+  if (stream.status !== 200) {
+    return record('REL-07c', 'FAIL', `SSE handshake status=${stream.status}`);
+  }
+  await stream.done;
+  const errEvt = stream.events.find((e) => e.event === 'error');
+  await sleep(800);
+  const inboundCount = await dbCount(CHANNEL_ID, messageId, 'inbound');
+  if (errEvt && inboundCount === 1) {
+    record('REL-07c', 'PASS', `error event delivered + inbound persisted (REL-06 invariant holds for SSE)`);
+  } else {
+    record('REL-07c', 'FAIL', `errEvt=${!!errEvt} inboundCount=${inboundCount}`);
+  }
+}
+
+async function rel07d() {
+  await dbCleanup(CHANNEL_ID);
+  // Start a long stream then abort early. Verify (1) gateway doesn't crash,
+  // (2) a follow-up sync request still succeeds.
+  const stream = await apiChatSSE('REL-07d disconnect', {
+    chatId: `rel-07-long-d-${Date.now()}`,
+    messageId: `rel-07d-${Date.now()}`,
+  });
+  if (stream.status !== 200) {
+    return record('REL-07d', 'FAIL', `SSE handshake status=${stream.status}`);
+  }
+  // Wait for at least one delta so we know the pipe is hot, then abort.
+  for (let i = 0; i < 30 && stream.events.filter((e) => e.event === 'delta').length === 0; i++) {
+    await sleep(100);
+  }
+  stream.abort();
+  await sleep(500);
+  // Follow-up sync request must still work.
+  const r = await apiChat('REL-07d follow-up', { chatId: `rel-07d-followup-${Date.now()}`, timeout: 10_000 });
+  if (r.status === 200 && r.body?.ok) {
+    record('REL-07d', 'PASS', `caller abort handled cleanly, follow-up sync request OK`);
+  } else {
+    record('REL-07d', 'FAIL', `follow-up failed: ${r.status} ${JSON.stringify(r.body)}`);
+  }
+}
+
 // ---------- main ----------
 async function preflight() {
   // Check gateway alive
@@ -308,6 +484,10 @@ async function main() {
   await rel06a();
   await rel06b();
   await rel06c();
+  await rel07a();
+  await rel07b();
+  await rel07c();
+  await rel07d();
 
   console.log('\n═══ SUMMARY ═══');
   for (const r of results) {

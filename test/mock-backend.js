@@ -107,6 +107,60 @@ function connect() {
           }));
           return;
         }
+        // REL-07 streaming modes — emit text.delta frames before message.send
+        // so SSE callers can verify intermediate event delivery.
+        //   rel-07-stream → 3 deltas, ~150ms apart, then done
+        //   rel-07-long   → deltas every 1s for 12s, then done (exceeds the
+        //                   old 600s cap is overkill; 12s is enough to prove
+        //                   the SSE path doesn't impose a request-level deadline)
+        if (chatId.includes('rel-07-stream') || chatId.includes('rel-07-long')) {
+          const isLong = chatId.includes('rel-07-long');
+          const deltaCount = isLong ? 12 : 3;
+          const intervalMs = isLong ? 1000 : 150;
+          const baseReply = `MOCK_REPLY: ${evt.data.content}`;
+          let i = 0;
+          const tick = () => {
+            if (ws.readyState !== WebSocket.OPEN) return;
+            if (i < deltaCount) {
+              ws.send(JSON.stringify({
+                type: 'relay.server.event',
+                connectionId: f.connectionId,
+                event: {
+                  type: 'text.delta',
+                  data: {
+                    chatId: evt.data.chatId,
+                    content: `chunk-${i} `,
+                    index: i,
+                    timestamp: Date.now(),
+                  },
+                },
+                timestamp: Date.now(),
+              }));
+              i++;
+              setTimeout(tick, intervalMs);
+              return;
+            }
+            const replyData = {
+              messageId: `mock-${Date.now()}-${randomUUID().slice(0, 8)}`,
+              chatId: evt.data.chatId,
+              content: baseReply,
+              contentType: 'text',
+              agentId: evt.data.agentId || 'main',
+              timestamp: Date.now(),
+              meta: { model: 'mock-1.0', deltaCount },
+            };
+            if (evt.data.threadId) replyData.threadId = evt.data.threadId;
+            if (!DROP_REPLY_TO) replyData.replyTo = evt.data.messageId;
+            ws.send(JSON.stringify({
+              type: 'relay.server.event',
+              connectionId: f.connectionId,
+              event: { type: 'message.send', data: replyData },
+              timestamp: Date.now(),
+            }));
+          };
+          setTimeout(tick, intervalMs);
+          return;
+        }
         const replyData = {
           messageId: `mock-${Date.now()}-${randomUUID().slice(0, 8)}`,
           chatId: evt.data.chatId,

@@ -1769,7 +1769,11 @@ function closeBackendChannel(channelId, code = 1012, reason = "backend replaced"
 
 function rejectAllApiRequests(sess, errMsg) {
   for (const [, req] of sess.requests) {
-    try { req.reject(new Error(errMsg)); } catch {}
+    if (req.streamSink) {
+      try { req.streamSink({ __sseError: true, message: errMsg }); } catch {}
+    } else {
+      try { req.reject(new Error(errMsg)); } catch {}
+    }
     if (req.timer) clearTimeout(req.timer);
   }
   sess.requests.clear();
@@ -1780,6 +1784,77 @@ function sendJson(ws, payload) {
     return;
   }
   ws.send(JSON.stringify(payload));
+}
+
+// ── SSE helpers ──
+// /api/chat supports `Accept: text/event-stream` to receive intermediate
+// agent events (text.delta, tool calls) as Server-Sent Events. The HTTP
+// response stays open until the agent emits message.send (→ done event)
+// or errors out (→ error event). 15s heartbeat keeps proxies from
+// breaking the connection. No HTTP-level timeout — flow is driven by
+// backend events and client disconnect.
+function setupSSE(response) {
+  const origin = response.req?.headers?.origin;
+  response.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache, no-transform',
+    'connection': 'keep-alive',
+    'x-accel-buffering': 'no',
+    ...getCorsHeaders(origin),
+  });
+  response.write('\n');
+  return {
+    event(name, data) {
+      if (response.writableEnded) return;
+      response.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+    },
+    ping() {
+      if (response.writableEnded) return;
+      response.write(`: ping ${Date.now()}\n\n`);
+    },
+    end() {
+      if (response.writableEnded) return;
+      response.end();
+    },
+  };
+}
+
+// Map a relay event coming from the backend to a named SSE event.
+// Returns null for event types we don't surface to SSE callers.
+// Catalog is intentionally narrow — gateway is event-shape-agnostic, so
+// random backend event types are dropped rather than leaked verbatim.
+function apiEventToSSE(apiEvent) {
+  const type = apiEvent?.type;
+  if (!type) return null;
+  if (type === 'message.send') {
+    return {
+      name: 'done',
+      data: {
+        replyMessageId: apiEvent.data?.messageId || null,
+        content: apiEvent.data?.content || '',
+        agentId: apiEvent.data?.agentId || null,
+        timestamp: apiEvent.data?.timestamp || Date.now(),
+        meta: apiEvent.data?.meta || {},
+        usage: apiEvent.data?.usage,
+      },
+    };
+  }
+  if (type === 'text.delta' || type === 'message.delta') {
+    return {
+      name: 'delta',
+      data: {
+        content: apiEvent.data?.content ?? apiEvent.data?.delta ?? '',
+        index: apiEvent.data?.index,
+      },
+    };
+  }
+  if (type === 'tool.call' || type === 'tool_call') {
+    return { name: 'tool_call', data: apiEvent.data || {} };
+  }
+  if (type === 'tool.result' || type === 'tool_result') {
+    return { name: 'tool_result', data: apiEvent.data || {} };
+  }
+  return null;
 }
 
 async function loadRelayConfig() {
@@ -2145,9 +2220,13 @@ backendWss.on("connection", (ws) => {
               if (sess.chatId) {
                 fanOut(boundChannelId, sess.chatId, apiEvent, frame.connectionId);
               }
-              req.replyEvents.push(apiEvent);
-              clearTimeout(req.timer);
-              req.resolve(req.replyEvents);
+              if (req.streamSink) {
+                req.streamSink(apiEvent);
+              } else {
+                req.replyEvents.push(apiEvent);
+                clearTimeout(req.timer);
+                req.resolve(req.replyEvents);
+              }
               sess.requests.delete(replyTo);
               routedToCaller = true;
             }
@@ -2160,6 +2239,12 @@ backendWss.on("connection", (ws) => {
           await persistMessageAsync(boundChannelId, apiEvent, 'outbound', sess.userId);
           if (sess.chatId) {
             fanOut(boundChannelId, sess.chatId, apiEvent, frame.connectionId);
+          }
+          // Forward intermediate frames to any SSE sinks on this session.
+          for (const [, r] of sess.requests) {
+            if (r.streamSink) {
+              try { r.streamSink(apiEvent); } catch {}
+            }
           }
         }
         return;
@@ -3121,14 +3206,17 @@ server.on("request", async (request, response) => {
         return;
       }
 
-      // Timeout: priority is body.timeout > query.timeout > env > default 300s.
-      // Clamped to [5s, 600s] to prevent silly values + abuse (P0-β).
+      // Sync path: priority is body.timeout > query.timeout > env > default 300s.
+      // Hard cap defaults to 30 min, env-overridable. Min 5s. SSE path ignores
+      // these caps entirely — it's driven by backend events + caller disconnect.
       const DEFAULT_TIMEOUT_MS = parseInt(process.env.RELAY_API_CHAT_TIMEOUT_MS || '300000', 10);
-      const MAX_TIMEOUT_MS = 600_000;
+      const MAX_TIMEOUT_MS = parseInt(process.env.RELAY_API_CHAT_MAX_TIMEOUT_MS || '1800000', 10);
       const MIN_TIMEOUT_MS = 5_000;
       const requestedTimeout = parseInt(body.timeout, 10) || parseInt(url.searchParams.get('timeout'), 10) || DEFAULT_TIMEOUT_MS;
       const TIMEOUT_MS = Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, requestedTimeout));
       const POOL_IDLE_MS = 5 * 60_000; // 5 min keep-alive
+
+      const wantsSSE = (request.headers.accept || '').toLowerCase().includes('text/event-stream');
 
       // Stable sessionId derived from channel+chat+agent so the same conversation
       // with the same agent reuses the same backend connection, preserving agent
@@ -3230,6 +3318,19 @@ server.on("request", async (request, response) => {
       // If inbound exists but no outbound yet, return 409 (caller can retry).
       const idem = await checkIdempotency(channelId, messageId);
       if (idem?.kind === 'cached') {
+        if (wantsSSE) {
+          const sseCached = setupSSE(response);
+          sseCached.event('accepted', { inboundMessageId: messageId, chatId, channelId, cached: true });
+          sseCached.event('done', {
+            replyMessageId: idem.outbound.message_id,
+            content: idem.outbound.content || '',
+            agentId: idem.outbound.agent_id || agentId || null,
+            timestamp: idem.outbound.timestamp || Date.now(),
+            meta: { source: 'api', cached: true },
+          });
+          sseCached.end();
+          return;
+        }
         writeJson(response, 200, {
           ok: true,
           messageId: idem.outbound.message_id,
@@ -3269,6 +3370,90 @@ server.on("request", async (request, response) => {
           channelId, chatId,
           { type: 'message.send', data: { ...inboundEvent.data, direction: 'inbound', echo: true } },
         );
+      }
+
+      // ── SSE branch ──
+      // Caller asked for text/event-stream: open the response, register a
+      // streamSink on the request entry, and let backend events drive the
+      // response. No HTTP-level timeout — the stream lives until the agent
+      // emits message.send (→ done) or errors out (→ error), or the caller
+      // disconnects (sink dropped, in-flight request continues server-side
+      // for persistence/sibling sync).
+      if (wantsSSE) {
+        const sse = setupSSE(response);
+        let closed = false;
+        const heartbeat = setInterval(() => sse.ping(), 15_000);
+
+        const finalize = () => {
+          if (closed) return;
+          closed = true;
+          clearInterval(heartbeat);
+          sess.requests.delete(messageId);
+          if (sess.requests.size === 0 && !sess.idleTimer) {
+            sess.idleTimer = setTimeout(() => {
+              apiSessions.delete(sessionId);
+              sendJson(backend.ws, {
+                type: 'relay.client.close',
+                connectionId: sessionId,
+                code: 1000,
+                reason: 'api idle timeout',
+                timestamp: Date.now(),
+              });
+            }, POOL_IDLE_MS);
+          }
+          sse.end();
+        };
+
+        const streamSink = (apiEvent) => {
+          if (closed) return;
+          if (apiEvent?.__sseError) {
+            sse.event('error', { code: 'aborted', message: apiEvent.message || 'aborted' });
+            finalize();
+            return;
+          }
+          const mapped = apiEventToSSE(apiEvent);
+          if (!mapped) return;
+          sse.event(mapped.name, mapped.data);
+          if (mapped.name === 'done') finalize();
+        };
+
+        sess.requests.set(messageId, { streamSink });
+
+        request.on('close', () => {
+          if (closed) return;
+          // Caller went away. Drop the sink so future events go nowhere, but
+          // leave the in-flight request running so the agent's eventual
+          // message.send still gets persisted + fanned out to siblings.
+          closed = true;
+          clearInterval(heartbeat);
+          sess.requests.delete(messageId);
+        });
+
+        sse.event('accepted', { inboundMessageId: messageId, chatId, channelId });
+
+        if (isNewSession) {
+          sess.opening = (async () => {
+            sendJson(backend.ws, {
+              type: 'relay.client.open',
+              connectionId: sessionId,
+              query: { chatId, agentId: agentId || null, token: null },
+              authUser: { senderId, chatId, allowAgents: agentId ? [agentId] : undefined },
+              timestamp: ts,
+            });
+            await new Promise((r) => setTimeout(r, 50));
+          })();
+        }
+        if (sess.opening) {
+          await sess.opening;
+        }
+
+        sendJson(backend.ws, {
+          type: 'relay.client.event',
+          connectionId: sessionId,
+          event: inboundEvent,
+          timestamp: ts,
+        });
+        return;
       }
 
       // Set up the per-request promise + register inside the session.
@@ -3357,6 +3542,13 @@ server.on("request", async (request, response) => {
         meta: { source: 'api' },
       });
     } catch (err) {
+      if (response.headersSent) {
+        // SSE response already open (or partially written) — can't switch to
+        // JSON. Best effort: end the stream so the caller stops waiting.
+        try { response.end(); } catch {}
+        console.error('[api/chat:sse]', err);
+        return;
+      }
       if (err.message === 'timeout') {
         writeJson(response, 504, { ok: false, error: 'agent did not respond within timeout' });
       } else if (err.message?.startsWith('agent rejected') || err.message?.startsWith('agent closed')) {
