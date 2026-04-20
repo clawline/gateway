@@ -89,6 +89,24 @@ function connect() {
           log('NEVER_REPLY mode: dropping', evt.data.messageId);
           return;
         }
+        // REL-06 per-chatId behavior modes (guardrail tests for inbound persistence).
+        // Detected by chatId substring so a single mock-backend can serve all modes.
+        const chatId = evt.data?.chatId || '';
+        if (chatId.includes('rel-06-timeout') || chatId.includes('rel-06-drop')) {
+          log(`mode=silent (${chatId}): not replying to`, evt.data.messageId);
+          return;
+        }
+        if (chatId.includes('rel-06-reject')) {
+          log(`mode=reject (${chatId}): sending relay.server.reject for`, evt.data.messageId);
+          ws.send(JSON.stringify({
+            type: 'relay.server.reject',
+            connectionId: f.connectionId,
+            code: 1008,
+            message: 'mock-backend rejected (REL-06b)',
+            timestamp: Date.now(),
+          }));
+          return;
+        }
         const replyData = {
           messageId: `mock-${Date.now()}-${randomUUID().slice(0, 8)}`,
           chatId: evt.data.chatId,

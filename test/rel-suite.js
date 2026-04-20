@@ -66,6 +66,7 @@ async function apiChat(message, opts = {}) {
     senderId: opts.senderId || 'rel-user',
     chatId: opts.chatId || `rel-${Date.now()}`,
     ...(opts.timeout != null ? { timeout: opts.timeout } : {}),
+    ...(opts.messageId ? { messageId: opts.messageId } : {}),
   });
   return fetchJson(`${GW}/api/chat`, {
     method: 'POST',
@@ -221,6 +222,58 @@ async function rel05() {
   record('REL-05', 'SKIP', 'pending ADD-BACK #7 (HTTP idempotency check)');
 }
 
+// ---------- REL-06: inbound persists independently of outbound ----------
+// Iron rule: a user's inbound message MUST land in cl_messages regardless of
+// whether the agent replied, errored, or silently dropped it. Without this,
+// crashed/timed-out conversations leave no audit trail and no resyncable history.
+//
+// Currently FAILS by design (D6 ack-then-persist). Guardrail-first per resley.
+
+async function rel06Once(subId, chatIdSubstr, opts) {
+  await dbCleanup(CHANNEL_ID);
+  const messageId = `rel-06-${subId}-${Date.now()}`;
+  const r = await apiChat(`REL-06 ${subId}`, {
+    chatId: `rel-06-${chatIdSubstr}-${subId}`,
+    messageId,
+    timeout: 5000, // min allowed by server
+  }).catch((e) => ({ status: 0, body: { ok: false, error: String(e) } }));
+
+  // Allow any in-flight async persistence to settle
+  await sleep(1500);
+
+  const inboundCount = await dbCount(CHANNEL_ID, messageId, 'inbound');
+  // Total outbound rows in channel (we don't know reply messageId)
+  const outRes = await fetch(
+    `${SUPA_URL}/pg/rest/v1/cl_messages?channel_id=eq.${CHANNEL_ID}&direction=eq.outbound&select=id`,
+    { headers: { apikey: SUPA_KEY, authorization: `Bearer ${SUPA_KEY}` } }
+  );
+  const outboundCount = (await outRes.json()).length;
+
+  const httpOk = opts.expectStatuses.includes(r.status);
+  const detail = `inbound=${inboundCount} outbound=${outboundCount} HTTP=${r.status} (want HTTP in [${opts.expectStatuses.join(',')}], inbound==1)`;
+
+  if (httpOk && inboundCount === 1) {
+    record(`REL-06${subId}`, 'PASS', detail);
+  } else {
+    record(`REL-06${subId}`, 'FAIL', detail);
+  }
+}
+
+async function rel06a() {
+  // agent timeout — mock stays silent
+  await rel06Once('a', 'timeout', { expectStatuses: [504] });
+}
+
+async function rel06b() {
+  // agent reject — mock sends relay.server.reject
+  await rel06Once('b', 'reject', { expectStatuses: [502, 200] });
+}
+
+async function rel06c() {
+  // agent silently drops — mock stays silent (same observable as 06a, kept distinct per spec)
+  await rel06Once('c', 'drop', { expectStatuses: [504] });
+}
+
 // ---------- main ----------
 async function preflight() {
   // Check gateway alive
@@ -253,6 +306,9 @@ async function main() {
   await rel03();
   await rel04();
   await rel05();
+  await rel06a();
+  await rel06b();
+  await rel06c();
 
   console.log('\n═══ SUMMARY ═══');
   for (const r of results) {
