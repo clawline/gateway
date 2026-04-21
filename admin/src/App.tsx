@@ -247,7 +247,7 @@ function buildPluginConfig(channel: RelayChannel, backendEndpoint: string) {
   }, null, 2);
 }
 
-function buildClientConnectUrl(state: RelayState | null, channel: RelayChannel, user: RelayUser) {
+function buildClientConnectUrl(state: RelayState | null, channel: RelayChannel, user: RelayUser, webFrontendUrl?: string): string {
   const base = normalizeBaseUrl(state?.publicBaseUrl) || window.location.origin;
   const wsBase = httpToWs(base);
   // chatId defaults to senderId for DM routing — OpenClaw uses senderId as the message target
@@ -259,6 +259,10 @@ function buildClientConnectUrl(state: RelayState | null, channel: RelayChannel, 
   if (channel.label || channel.channelId) params.set('displayName', `${channel.label || channel.channelId}/${user.senderId || 'user'}`);
   if (channel.label) params.set('channelName', channel.label);
   if (channel.channelId) params.set('channelId', channel.channelId);
+  if (webFrontendUrl) {
+    const webBase = normalizeBaseUrl(webFrontendUrl);
+    return `${webBase}/connect?${params.toString()}`;
+  }
   return `openclaw://connect?${params.toString()}`;
 }
 
@@ -446,14 +450,26 @@ const NodeConfigModal = ({ channel, backendEndpoint, onClose }: {
 
 // ── User Connect Modal ───────────────────────────────────────
 
-const UserConnectModal = ({ user, channel, relayState, onClose }: {
+const UserConnectModal = ({ user, channel, relayState, webFrontends, onClose }: {
   user: RelayUser | null;
   channel: RelayChannel | null;
   relayState: RelayState | null;
+  webFrontends: string[];
   onClose: () => void;
 }) => {
+  const [selectedFrontend, setSelectedFrontend] = useState<string>('');
+
+  useEffect(() => {
+    if (user) setSelectedFrontend(webFrontends[0] ?? '');
+  }, [user, webFrontends]);
+
   if (!user || !channel) return null;
-  const connectionUrl = buildClientConnectUrl(relayState, channel, user);
+
+  const connectionUrl = buildClientConnectUrl(relayState, channel, user, selectedFrontend || undefined);
+  const protocolUrl = buildClientConnectUrl(relayState, channel, user);
+  const showDropdown = webFrontends.length > 1;
+  const showProtocolFallback = !!selectedFrontend;
+
   return (
     <ModalShell title="CONNECTION_PARAMS" icon={QrCode} accent="fuchsia" onClose={onClose} maxWidth="max-w-lg">
       <div className="p-6 flex flex-col items-center gap-5 overflow-y-auto">
@@ -465,6 +481,18 @@ const UserConnectModal = ({ user, channel, relayState, onClose }: {
           <span className="text-fuchsia-600">TOKEN</span>
           <span className="font-mono text-fuchsia-300">{user.token.slice(0, 8)}…{user.token.slice(-4)}</span>
         </div>
+        {showDropdown && (
+          <div className="w-full space-y-1.5">
+            <label className={labelClassName}>Web Frontend</label>
+            <select value={selectedFrontend} onChange={(e) => setSelectedFrontend(e.target.value)}
+              className={inputClassName}>
+              {webFrontends.map((f) => (
+                <option key={f} value={f}>{f}</option>
+              ))}
+              <option value="">openclaw:// (protocol URL)</option>
+            </select>
+          </div>
+        )}
         <div className="p-4 bg-white">
           <QRCodeImage value={connectionUrl} size={180} />
         </div>
@@ -475,6 +503,15 @@ const UserConnectModal = ({ user, channel, relayState, onClose }: {
           </div>
           <div className="p-3 bg-black/40 border border-fuchsia-900/30 font-mono text-xs text-fuchsia-200 break-all">{connectionUrl}</div>
         </div>
+        {showProtocolFallback && (
+          <div className="w-full space-y-1.5">
+            <div className="flex justify-between items-center">
+              <span className="text-[10px] text-slate-600 tracking-widest uppercase">Protocol URL</span>
+              <CopyBtn text={protocolUrl} />
+            </div>
+            <div className="p-2 bg-black/20 border border-slate-800 font-mono text-[10px] text-slate-600 break-all">{protocolUrl}</div>
+          </div>
+        )}
       </div>
     </ModalShell>
   );
@@ -818,6 +855,9 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
   const [corsOrigins, setCorsOrigins] = useState<string[]>([]);
   const [corsInput, setCorsInput] = useState('');
   const [corsSaving, setCorsSaving] = useState(false);
+  const [webFrontends, setWebFrontends] = useState<string[]>([]);
+  const [webFrontendInput, setWebFrontendInput] = useState('');
+  const [webFrontendSaving, setWebFrontendSaving] = useState(false);
 
   const activeRelay = relayNodes.find((n) => n.id === selectedRelayId) ?? relayNodes[0] ?? DEFAULT_RELAY;
   const gatewayRelay: RelayNode = DEFAULT_RELAY;
@@ -837,9 +877,11 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
 
   const fetchCorsOrigins = useCallback(async () => {
     try {
-      const data = await apiFetch<{ ok: boolean; settings?: { corsAllowedOrigins?: string[] }; _env?: { CORS_ALLOWED_ORIGINS?: string[] } }>('/api/settings', activeRelay, undefined);
+      const data = await apiFetch<{ ok: boolean; settings?: { corsAllowedOrigins?: string[]; webFrontends?: string[] }; _env?: { CORS_ALLOWED_ORIGINS?: string[] } }>('/api/settings', activeRelay, undefined);
       const origins = data.settings?.corsAllowedOrigins ?? data._env?.CORS_ALLOWED_ORIGINS ?? [];
       setCorsOrigins(origins);
+      const frontends = data.settings?.webFrontends ?? [];
+      setWebFrontends(frontends);
     } catch { /* ignore */ }
   }, [activeRelay]);
 
@@ -850,6 +892,15 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
       setCorsOrigins(origins);
     } catch { /* ignore */ }
     setCorsSaving(false);
+  }, [activeRelay]);
+
+  const saveWebFrontends = useCallback(async (frontends: string[]) => {
+    setWebFrontendSaving(true);
+    try {
+      await apiFetch('/api/settings', activeRelay, { method: 'PUT', body: JSON.stringify({ webFrontends: frontends }) });
+      setWebFrontends(frontends);
+    } catch { /* ignore */ }
+    setWebFrontendSaving(false);
   }, [activeRelay]);
 
   const saveAiSettingsHandler = useCallback(async () => {
@@ -1294,6 +1345,34 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
                 </form>
               </div>
               <div className="pt-4 border-t border-slate-800 mt-4">
+                <h3 className="text-[11px] font-medium text-slate-400 tracking-widest uppercase mb-1">Web Frontend URLs</h3>
+                <p className="text-[10px] text-slate-600 mb-3">QR codes and share links will use the first URL. Leave empty to fall back to <span className="font-mono">openclaw://</span>.</p>
+                <div className="space-y-1.5 mb-3">
+                  {webFrontends.length === 0 && <p className="text-[11px] text-slate-600">No frontends configured (openclaw:// fallback)</p>}
+                  {webFrontends.map((frontend, i) => (
+                    <div key={i} className="flex items-center gap-2 px-3 py-1.5 bg-slate-900/60 border border-slate-800">
+                      <Globe className="w-3 h-3 text-fuchsia-600 shrink-0" />
+                      <span className="flex-1 text-xs text-slate-300 font-mono truncate">{frontend}</span>
+                      {i === 0 && <span className="text-[9px] text-fuchsia-500 tracking-widest uppercase shrink-0">DEFAULT</span>}
+                      <button type="button" onClick={() => { const next = webFrontends.filter((_, j) => j !== i); void saveWebFrontends(next); }}
+                        className="text-slate-600 hover:text-rose-400 transition-colors p-0.5">
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <form onSubmit={(e) => { e.preventDefault(); const v = webFrontendInput.trim(); if (v && !webFrontends.includes(v)) { void saveWebFrontends([...webFrontends, v]); setWebFrontendInput(''); } }}
+                  className="flex gap-2">
+                  <input value={webFrontendInput} onChange={(e) => setWebFrontendInput(e.target.value)}
+                    placeholder="https://clawline.app"
+                    className={inputClassName + ' flex-1'} />
+                  <button type="submit" disabled={webFrontendSaving || !webFrontendInput.trim()}
+                    className="px-3 border border-slate-700 text-fuchsia-400 hover:bg-fuchsia-950/50 text-xs disabled:opacity-30 transition-colors shrink-0">
+                    {webFrontendSaving ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                  </button>
+                </form>
+              </div>
+              <div className="pt-4 border-t border-slate-800 mt-4">
                 <button type="button" onClick={() => { void runDiagnostic(); setIsRelaySettingsOpen(false); }}
                   className="w-full py-2.5 border border-slate-700 text-cyan-400 hover:bg-cyan-950/50 transition-colors flex items-center justify-center gap-2 text-xs">
                   <Activity className="w-4 h-4" /> RUN_DIAGNOSTIC
@@ -1445,7 +1524,7 @@ function AdminDashboard({ logtoUser, onLogtoSignOut }: {
       <DiagnosticModal isOpen={isDiagOpen} isLoading={isDiagLoading} lines={diagLines} onClose={() => setIsDiagOpen(false)} />
       <AppDialogModal state={appDialogState} isSubmitting={isAppDialogSubmitting} error={appDialogError} onClose={closeAppDialog} onConfirm={() => { void handleAppDialogConfirm(); }} />
       <NodeConfigModal channel={configChannel} backendEndpoint={backendEndpoint} onClose={() => setConfigChannelId(null)} />
-      <UserConnectModal user={qrUser} channel={qrChannel} relayState={relayState} onClose={() => setQrTarget(null)} />
+      <UserConnectModal user={qrUser} channel={qrChannel} relayState={relayState} webFrontends={webFrontends} onClose={() => setQrTarget(null)} />
       <ChannelFormModal state={channelModalState} onClose={() => { if (!isChannelSubmitting && !channelSubmitSuccess) { setChannelModalState(null); setChannelFormError(null); } }} onSubmit={submitChannel} isSubmitting={isChannelSubmitting} submitSuccess={channelSubmitSuccess} error={channelFormError} />
       <UserFormModal state={userModalState} channel={selectedChannel} onClose={() => { if (!isUserSubmitting && !userSubmitSuccess) { setUserModalState(null); setUserFormError(null); } }} onSubmit={submitUser} isSubmitting={isUserSubmitting} submitSuccess={userSubmitSuccess} error={userFormError} />
 
