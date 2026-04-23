@@ -247,7 +247,7 @@ function buildPluginConfig(channel: RelayChannel, backendEndpoint: string) {
   }, null, 2);
 }
 
-function buildClientConnectUrl(state: RelayState | null, channel: RelayChannel, user: RelayUser, webFrontendUrl?: string): string {
+function buildClientConnectUrl(state: RelayState | null, channel: RelayChannel, user: RelayUser, webFrontendUrl?: string, options?: { directChat?: boolean; allowBack?: boolean }): string {
   const base = normalizeBaseUrl(state?.publicBaseUrl) || window.location.origin;
   const wsBase = httpToWs(base);
   // chatId defaults to senderId for DM routing — OpenClaw uses senderId as the message target
@@ -259,6 +259,8 @@ function buildClientConnectUrl(state: RelayState | null, channel: RelayChannel, 
   if (channel.label || channel.channelId) params.set('displayName', `${channel.label || channel.channelId}/${user.senderId || 'user'}`);
   if (channel.label) params.set('channelName', channel.label);
   if (channel.channelId) params.set('channelId', channel.channelId);
+  if (options?.directChat) params.set('directChat', '1');
+  if (options?.directChat && options?.allowBack) params.set('allowBack', '1');
   if (webFrontendUrl) {
     const webBase = normalizeBaseUrl(webFrontendUrl);
     return `${webBase}/connect?${params.toString()}`;
@@ -458,6 +460,8 @@ const UserConnectModal = ({ user, channel, relayState, webFrontends, onClose }: 
   onClose: () => void;
 }) => {
   const [selectedFrontend, setSelectedFrontend] = useState<string>('');
+  const [directChat, setDirectChat] = useState(false);
+  const [allowBack, setAllowBack] = useState(false);
 
   useEffect(() => {
     if (user) setSelectedFrontend(webFrontends[0] ?? '');
@@ -465,8 +469,9 @@ const UserConnectModal = ({ user, channel, relayState, webFrontends, onClose }: 
 
   if (!user || !channel) return null;
 
-  const connectionUrl = buildClientConnectUrl(relayState, channel, user, selectedFrontend || undefined);
-  const protocolUrl = buildClientConnectUrl(relayState, channel, user);
+  const connectOptions = { directChat, allowBack };
+  const connectionUrl = buildClientConnectUrl(relayState, channel, user, selectedFrontend || undefined, connectOptions);
+  const protocolUrl = buildClientConnectUrl(relayState, channel, user, undefined, connectOptions);
   const showDropdown = webFrontends.length > 1;
   const showProtocolFallback = !!selectedFrontend;
 
@@ -493,6 +498,38 @@ const UserConnectModal = ({ user, channel, relayState, webFrontends, onClose }: 
             </select>
           </div>
         )}
+        {/* Direct jump options */}
+        <div className="w-full space-y-2">
+          <label className={labelClassName}>Link Behaviour</label>
+          <label className="flex items-center justify-between gap-3 cursor-pointer py-2 px-3 bg-slate-900/40 border border-slate-800 hover:border-fuchsia-900/40 transition-colors">
+            <span className="text-xs text-slate-300">Direct jump to chat (skip list)</span>
+            <div
+              onClick={() => { setDirectChat(v => !v); if (allowBack && directChat) setAllowBack(false); }}
+              className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer flex-shrink-0 ${
+                directChat ? 'bg-fuchsia-600' : 'bg-slate-700'
+              }`}
+            >
+              <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                directChat ? 'translate-x-4' : 'translate-x-0.5'
+              }`} />
+            </div>
+          </label>
+          {directChat && (
+            <label className="flex items-center justify-between gap-3 cursor-pointer py-2 px-3 bg-slate-900/40 border border-slate-800 hover:border-fuchsia-900/40 transition-colors ml-4">
+              <span className="text-xs text-slate-400">Allow back to list</span>
+              <div
+                onClick={() => setAllowBack(v => !v)}
+                className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer flex-shrink-0 ${
+                  allowBack ? 'bg-fuchsia-600' : 'bg-slate-700'
+                }`}
+              >
+                <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                  allowBack ? 'translate-x-4' : 'translate-x-0.5'
+                }`} />
+              </div>
+            </label>
+          )}
+        </div>
         <div className="p-4 bg-white">
           <QRCodeImage value={connectionUrl} size={180} />
         </div>
