@@ -3176,6 +3176,27 @@ server.on("request", async (request, response) => {
       const agentId = typeof body.agentId === 'string' ? body.agentId.trim() : undefined;
       const senderId = typeof body.senderId === 'string' ? body.senderId.trim() : 'api';
 
+      // Multimodal support — mirror the WebSocket message.receive contract.
+      // messageType: one of text|image|voice|audio|file (default 'text').
+      // mediaUrl: optional URL pointing to a previously uploaded file via /api/media/upload.
+      // content (message) stays required as a non-empty string (matches WS validation at G-45)
+      // — for images, callers should pass a short caption/description.
+      const VALID_MESSAGE_TYPES = ['text', 'image', 'voice', 'audio', 'file'];
+      const messageType = (typeof body.messageType === 'string' && body.messageType.trim())
+        ? body.messageType.trim()
+        : 'text';
+      if (!VALID_MESSAGE_TYPES.includes(messageType)) {
+        writeJson(response, 400, { ok: false, error: `messageType must be one of ${VALID_MESSAGE_TYPES.join(',')}` });
+        return;
+      }
+      const mediaUrl = (typeof body.mediaUrl === 'string' && body.mediaUrl.trim())
+        ? body.mediaUrl.trim()
+        : undefined;
+      if (messageType !== 'text' && !mediaUrl) {
+        writeJson(response, 400, { ok: false, error: `mediaUrl is required when messageType=${messageType}` });
+        return;
+      }
+
       // chatId resolution:
       // 1. Explicit chatId in request body → use as-is
       // 2. Fallback → senderId
@@ -3305,8 +3326,9 @@ server.on("request", async (request, response) => {
           senderId,
           senderName: body.senderName || senderId,
           agentId,  // required — validated above
-          messageType: 'text',
+          messageType,
           content: message,
+          ...(mediaUrl ? { mediaUrl } : {}),
           timestamp: ts,
           ...(requestedThreadId ? { threadId: requestedThreadId } : {}),
           meta: { source: 'api' },
