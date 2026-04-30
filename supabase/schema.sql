@@ -70,9 +70,11 @@ create index if not exists cl_messages_channel_ts_idx
 create index if not exists cl_messages_sender_idx
   on public.cl_messages (channel_id, sender_id, timestamp desc);
 
--- Deduplication: same message_id + direction should not be stored twice
-CREATE UNIQUE INDEX IF NOT EXISTS cl_messages_msgid_dir_uniq
-  ON public.cl_messages (message_id, direction)
+-- Deduplication: same (channel_id, message_id, direction) should not be stored twice.
+-- Scoped by channel_id so two channels can use overlapping client-supplied
+-- messageIds without one silently swallowing the other (P0-1, 2026-04-30).
+CREATE UNIQUE INDEX IF NOT EXISTS cl_messages_chan_msgid_dir_uniq
+  ON public.cl_messages (channel_id, message_id, direction)
   WHERE message_id IS NOT NULL;
 
 create index if not exists cl_messages_thread_id_idx

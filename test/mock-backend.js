@@ -152,18 +152,21 @@ function connect() {
           const tick = () => {
             if (ws.readyState !== WebSocket.OPEN) return;
             if (i < deltaCount) {
+              const deltaData = {
+                chatId: evt.data.chatId,
+                content: `chunk-${i} `,
+                index: i,
+                timestamp: Date.now(),
+              };
+              // P0-3: tag deltas with replyTo so gateway can route to the
+              // owning SSE caller and not broadcast to every concurrent sink.
+              // Honor MOCK_DROP_REPLY_TO so we can still test the no-replyTo
+              // case (gateway must drop, not broadcast).
+              if (!DROP_REPLY_TO) deltaData.replyTo = evt.data.messageId;
               ws.send(JSON.stringify({
                 type: 'relay.server.event',
                 connectionId: f.connectionId,
-                event: {
-                  type: 'text.delta',
-                  data: {
-                    chatId: evt.data.chatId,
-                    content: `chunk-${i} `,
-                    index: i,
-                    timestamp: Date.now(),
-                  },
-                },
+                event: { type: 'text.delta', data: deltaData },
                 timestamp: Date.now(),
               }));
               i++;

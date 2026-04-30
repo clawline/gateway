@@ -327,7 +327,7 @@ async function persistMessageAsync(channelId, event, direction, senderId) {
         },
         body: JSON.stringify(row),
       });
-      if (res.ok || (res.status >= 200 && res.status < 300) || res.status === 409) {
+      if (res.ok || (res.status >= 200 && res.status < 300)) {
         // On successful persist, update thread metadata if applicable
         if (row.thread_id) {
           const data = event.data || event;
@@ -338,7 +338,44 @@ async function persistMessageAsync(channelId, event, direction, senderId) {
             data.content || data.text || null
           );
         }
-        return true; // success or duplicate
+        return true;
+      }
+      if (res.status === 409) {
+        // Unique-index conflict. Pre-fix DB had a global index on
+        // (message_id, direction) so collisions across channels were silently
+        // swallowed → P0-1 dropped messages. Post-fix index is
+        // (channel_id, message_id, direction). To survive both old and new
+        // schemas, verify the existing row matches our channel before claiming
+        // success. Anything else is a real conflict and must NOT be reported
+        // as success — the caller will treat false as a hard failure.
+        if (!row.message_id) return true; // null message_id can never collide; defensive
+        try {
+          const verifyRes = await fetch(
+            `${supabaseUrl}/pg/rest/v1/cl_messages?channel_id=eq.${encodeURIComponent(row.channel_id)}&message_id=eq.${encodeURIComponent(row.message_id)}&direction=eq.${encodeURIComponent(row.direction)}&select=id&limit=1`,
+            { headers: { apikey: supabaseKey, authorization: `Bearer ${supabaseKey}` } }
+          );
+          if (verifyRes.ok) {
+            const rows = await verifyRes.json();
+            if (Array.isArray(rows) && rows.length > 0) {
+              if (row.thread_id) {
+                const data = event.data || event;
+                updateThreadOnNewReply(
+                  channelId, row.thread_id,
+                  senderId || data.senderId || null,
+                  data.messageId || null,
+                  data.content || data.text || null
+                );
+              }
+              return true; // genuine same-channel duplicate → idempotent success
+            }
+          }
+        } catch (verifyErr) {
+          console.error(`[messages] persist 409 verify failed: ${row.message_id}`, verifyErr);
+        }
+        // 409 but no row visible for this (channel, msgid, direction) → cross-channel
+        // collision under the legacy index. Surface the failure rather than swallow it.
+        console.error(`[messages] persist 409 cross-channel collision: channel=${row.channel_id} msgid=${row.message_id} dir=${row.direction} — apply migrations/20260430_fix_msg_unique_index.sql`);
+        return false;
       }
       if (res.status < 500) {
         // 4xx — log but don't retry (bad data)
@@ -368,6 +405,48 @@ async function persistMessageAsync(channelId, event, direction, senderId) {
   }
   return false;
 }
+
+// ── Async outbound persist queue (P1-3 fix) ──
+// Outbound persistence used to be `await persistMessageAsync(...)` on the hot
+// path. Supabase 5xx with 3×1s retry could stall the whole channel's backend
+// ws (HOL block) and starve fanOut/sendJson. Queue here is fire-and-forget
+// from the caller's POV; a single background worker drains serially. Inbound
+// persistence stays synchronous (REL-06 invariant: caller must learn DB
+// failure as HTTP 500).
+const outboundPersistQueue = [];
+let outboundPersistWorking = false;
+const outboundPersistMetrics = { enqueued: 0, drained: 0, failed: 0, queueHighWater: 0 };
+async function drainOutboundPersistQueue() {
+  if (outboundPersistWorking) return;
+  outboundPersistWorking = true;
+  try {
+    while (outboundPersistQueue.length > 0) {
+      const job = outboundPersistQueue.shift();
+      try {
+        const ok = await persistMessageAsync(job.channelId, job.event, 'outbound', job.senderId);
+        if (!ok) outboundPersistMetrics.failed++;
+        outboundPersistMetrics.drained++;
+      } catch (err) {
+        outboundPersistMetrics.failed++;
+        console.error('[outbound persist] worker caught:', err);
+      }
+    }
+  } finally {
+    outboundPersistWorking = false;
+  }
+}
+function enqueueOutboundPersist(channelId, event, senderId) {
+  outboundPersistQueue.push({ channelId, event, senderId });
+  outboundPersistMetrics.enqueued++;
+  if (outboundPersistQueue.length > outboundPersistMetrics.queueHighWater) {
+    outboundPersistMetrics.queueHighWater = outboundPersistQueue.length;
+  }
+  // Kick the worker without awaiting (don't block hot path).
+  drainOutboundPersistQueue().catch((err) => console.error('[outbound persist] drain error:', err));
+}
+
+// ── Per-session in-flight request collision metric (P0-2 fix) ──
+const sessionRequestMetrics = { dupRejected: 0 };
 
 // On startup: replay dead-letter file
 (async function replayDeadLetters() {
@@ -2190,7 +2269,7 @@ backendWss.on("connection", (ws) => {
           if (normalized) ensureThreadKnown(boundChannelId, normalized);
         }
 
-        await persistMessageAsync(boundChannelId, frame.event, 'outbound', real.userId);
+        enqueueOutboundPersist(boundChannelId, frame.event, real.userId);
         sendJson(real.ws, frame.event);
         if (real.chatId) {
           fanOut(boundChannelId, real.chatId, frame.event, frame.connectionId);
@@ -2205,18 +2284,22 @@ backendWss.on("connection", (ws) => {
           apiEvent.data = { ...apiEvent.data, meta: { source: 'api', ...(apiEvent.data.meta || {}) } };
         }
 
-        // D3: route message.send strictly by replyTo. Agent missing replyTo = no
-        // resolution, the caller's timer trips → 504. No FIFO fallback.
-        // Inbound was already persisted + fanned out at /api/chat entry, so
-        // here we only handle the outbound ack: persist outbound, fanOut to
-        // siblings, resolve the waiting caller.
+        // P0-3 fix: replyTo-aware routing for ALL frame types, not just
+        // message.send. Channel now tags streaming frames (text.delta,
+        // thinking.*, tool.*) with replyTo = inbound messageId. If replyTo
+        // is present we deliver only to the owner sink; otherwise (truly
+        // orphan frame, no per-request tag) we drop instead of broadcasting
+        // to every sink in sess.requests — that broadcast was the privacy
+        // leak (concurrent SSE callers on the same session saw each other's
+        // thinking/delta). fanOut to WS siblings is unaffected; cross-device
+        // streaming relies on the chat-scoped fanOut path.
         let routedToCaller = false;
-        if (apiEvent?.type === 'message.send') {
-          const replyTo = apiEvent?.data?.replyTo;
-          if (replyTo) {
-            const req = sess.requests.get(replyTo);
-            if (req) {
-              await persistMessageAsync(boundChannelId, apiEvent, 'outbound', sess.userId);
+        const replyTo = apiEvent?.data?.replyTo;
+        if (replyTo) {
+          const req = sess.requests.get(replyTo);
+          if (req) {
+            if (apiEvent?.type === 'message.send') {
+              enqueueOutboundPersist(boundChannelId, apiEvent, sess.userId);
               if (sess.chatId) {
                 fanOut(boundChannelId, sess.chatId, apiEvent, frame.connectionId);
               }
@@ -2228,23 +2311,40 @@ backendWss.on("connection", (ws) => {
                 req.resolve(req.replyEvents);
               }
               sess.requests.delete(replyTo);
-              routedToCaller = true;
+            } else {
+              // Streaming/intermediate frame: deliver only to the owner sink.
+              // No persistence (MESSAGE_TYPES_TO_PERSIST excludes deltas).
+              if (sess.chatId) {
+                // fanOut so WS siblings see the live stream too.
+                fanOut(boundChannelId, sess.chatId, apiEvent, frame.connectionId);
+              }
+              if (req.streamSink) {
+                try { req.streamSink(apiEvent); } catch {}
+              }
             }
+            routedToCaller = true;
+          } else {
+            // replyTo present but the matching caller is gone. Drop + log;
+            // do NOT fall through to a broadcast (privacy).
+            console.warn(`[router] dropping ${apiEvent?.type} replyTo=${replyTo} — no owner sink in session ${sess.sessionId}`);
+            // Still let WS siblings see message.send so cross-device stays consistent.
+            if (apiEvent?.type === 'message.send') {
+              enqueueOutboundPersist(boundChannelId, apiEvent, sess.userId);
+              if (sess.chatId) {
+                fanOut(boundChannelId, sess.chatId, apiEvent, frame.connectionId);
+              }
+            }
+            routedToCaller = true;
           }
         }
         if (!routedToCaller) {
-          // No matching caller (intermediate stream frame, or message.send without
-          // replyTo, or unknown replyTo). Persist outbound + fan out so siblings
-          // see whatever the agent emitted.
-          await persistMessageAsync(boundChannelId, apiEvent, 'outbound', sess.userId);
+          // No matching caller and no replyTo (e.g. agent-emitted frame with
+          // no inbound origin). Persist + fan out to WS siblings only — DO
+          // NOT push to sess.requests streamSinks; that path was the source
+          // of the privacy leak between concurrent HTTP/SSE callers.
+          enqueueOutboundPersist(boundChannelId, apiEvent, sess.userId);
           if (sess.chatId) {
             fanOut(boundChannelId, sess.chatId, apiEvent, frame.connectionId);
-          }
-          // Forward intermediate frames to any SSE sinks on this session.
-          for (const [, r] of sess.requests) {
-            if (r.streamSink) {
-              try { r.streamSink(apiEvent); } catch {}
-            }
           }
         }
         return;
@@ -2262,13 +2362,13 @@ backendWss.on("connection", (ws) => {
       }
 
       // No live destination — persist for reconnect sync (lastSeen replay path).
-      await persistMessageAsync(boundChannelId, frame.event, 'outbound', null);
+      enqueueOutboundPersist(boundChannelId, frame.event, null);
       return;
     }
 
     if (frame?.type === "relay.server.persist") {
       console.log(`[relay] ← backend ${boundChannelId} persist-only: ${frame.event?.type || 'unknown'}`);
-      await persistMessageAsync(boundChannelId, frame.event, 'outbound', frame.senderId || null);
+      enqueueOutboundPersist(boundChannelId, frame.event, frame.senderId || null);
       return;
     }
 
@@ -3282,6 +3382,33 @@ server.on("request", async (request, response) => {
         sess.idleTimer = null;
       }
 
+      // P0-2 fix: reject duplicate in-flight messageId on the same session.
+      // Pre-fix `sess.requests.set(messageId, …)` blindly overwrote the
+      // existing entry, leaving the first caller's resolve/reject unreachable
+      // (it would only ever timeout). The DB-level idempotency check below
+      // catches the case where inbound was already persisted, but a true
+      // concurrent retry on the same messageId can race ahead of that DB
+      // write — this in-memory claim is the safety net. We synchronously
+      // place a placeholder so that any concurrent /api/chat that wakes up
+      // between this point and the real sess.requests.set sees the slot
+      // already taken and bails with 409.
+      if (sess.requests.has(messageId)) {
+        sessionRequestMetrics.dupRejected++;
+        writeJson(response, 409, {
+          ok: false,
+          error: 'duplicate messageId still in flight',
+          inboundMessageId: messageId,
+        });
+        return;
+      }
+      const claim = { _claiming: true };
+      sess.requests.set(messageId, claim);
+      const releaseClaimOnError = () => {
+        // Only release if our placeholder is still in the slot. SSE / non-SSE
+        // paths replace it with the real entry; if so we leave it alone.
+        if (sess.requests.get(messageId) === claim) sess.requests.delete(messageId);
+      };
+
       // Optional: route the message into a specific thread. If provided, validate it
       // exists + belongs to this channel; otherwise return 400. We do NOT silently
       // fall back to main chat — caller asked for a thread, getting silent re-routing
@@ -3293,6 +3420,7 @@ server.on("request", async (request, response) => {
         const supabaseUrl = process.env.RELAY_SUPABASE_URL;
         const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
         if (!supabaseUrl || !supabaseKey) {
+          releaseClaimOnError();
           writeJson(response, 503, { ok: false, error: 'thread persistence not configured' });
           return;
         }
@@ -3303,14 +3431,17 @@ server.on("request", async (request, response) => {
           );
           const rows = await tRes.json();
           if (!Array.isArray(rows) || rows.length === 0) {
+            releaseClaimOnError();
             writeJson(response, 400, { ok: false, error: `threadId not found in channel ${channelId}` });
             return;
           }
           if (rows[0].status === 'deleted') {
+            releaseClaimOnError();
             writeJson(response, 400, { ok: false, error: 'threadId is deleted' });
             return;
           }
         } catch (err) {
+          releaseClaimOnError();
           writeJson(response, 500, { ok: false, error: `thread lookup failed: ${err.message || err}` });
           return;
         }
@@ -3340,6 +3471,7 @@ server.on("request", async (request, response) => {
       // If inbound exists but no outbound yet, return 409 (caller can retry).
       const idem = await checkIdempotency(channelId, messageId);
       if (idem?.kind === 'cached') {
+        releaseClaimOnError();
         if (wantsSSE) {
           const sseCached = setupSSE(response);
           sseCached.event('accepted', { inboundMessageId: messageId, chatId, channelId, cached: true });
@@ -3366,6 +3498,7 @@ server.on("request", async (request, response) => {
         return;
       }
       if (idem?.kind === 'in_flight') {
+        releaseClaimOnError();
         writeJson(response, 409, {
           ok: false,
           error: 'duplicate messageId still in flight',
@@ -3382,6 +3515,7 @@ server.on("request", async (request, response) => {
         channelId, inboundEvent, 'inbound', senderId
       );
       if (!inboundPersisted) {
+        releaseClaimOnError();
         writeJson(response, 500, { ok: false, error: 'failed to persist inbound message' });
         return;
       }
