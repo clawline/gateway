@@ -25,6 +25,11 @@ const REPLY_DELAY_MS = Number(process.env.MOCK_REPLY_DELAY_MS || '50');
 const DROP_REPLY_TO = process.env.MOCK_DROP_REPLY_TO === '1';
 const NEVER_REPLY = process.env.MOCK_NEVER_REPLY === '1';
 const INSTANCE_ID = process.env.MOCK_INSTANCE_ID || 'mock-backend';
+// MSG-FLOW regression: simulate the pre-fix channel bug where the channel
+// re-broadcasts the inbound user message back to gateway as a `message.send`,
+// which gateway then persists as an outbound row carrying the user's text.
+// Off by default; enable to prove the bug exists pre-fix.
+const ECHO_INBOUND_AS_OUTBOUND = process.env.MOCK_ECHO_INBOUND_AS_OUTBOUND === '1';
 
 let ws;
 let reconnectTimer;
@@ -85,6 +90,31 @@ function connect() {
     if (f.type === 'relay.client.event') {
       const evt = f.event;
       if (evt.type === 'message.receive') {
+        if (ECHO_INBOUND_AS_OUTBOUND) {
+          // Pre-fix bug repro: re-emit the inbound payload as a `message.send`
+          // back to gateway, mirroring what channel/src/generic/client.ts used
+          // to do via broadcastToChatExcept. Gateway persists this as a
+          // direction='outbound' row with the user's original messageId/content.
+          ws.send(JSON.stringify({
+            type: 'relay.server.event',
+            connectionId: f.connectionId,
+            event: {
+              type: 'message.send',
+              data: {
+                messageId: evt.data.messageId,
+                chatId: evt.data.chatId,
+                agentId: evt.data.agentId,
+                senderId: evt.data.senderId,
+                content: evt.data.content,
+                contentType: evt.data.messageType || 'text',
+                timestamp: evt.data.timestamp || Date.now(),
+                direction: 'inbound',
+                echo: true,
+              },
+            },
+            timestamp: Date.now(),
+          }));
+        }
         if (NEVER_REPLY) {
           log('NEVER_REPLY mode: dropping', evt.data.messageId);
           return;
