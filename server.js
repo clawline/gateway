@@ -237,11 +237,12 @@ const PERSIST_MAX_RETRIES = 2;
 const PERSIST_RETRY_DELAY_MS = 1000;
 const DEAD_LETTER_PATH = join(baseDir, 'data', 'persist-failures.jsonl');
 
-function buildPersistRow(channelId, event, direction, senderId) {
+function buildPersistRow(channelId, event, direction, senderId, chatId) {
   const data = event.data || event;
   const threadId = normalizeThreadId(data.threadId || null);
   return {
     channel_id: channelId,
+    chat_id: chatId || data.chatId || null,
     sender_id: senderId || data.senderId || null,
     agent_id: data.agentId || null,
     message_id: data.messageId || null,
@@ -305,7 +306,7 @@ async function checkIdempotency(channelId, messageId) {
  * Returns true if persisted successfully, false otherwise.
  * Also updates thread metadata when the message belongs to a thread.
  */
-async function persistMessageAsync(channelId, event, direction, senderId) {
+async function persistMessageAsync(channelId, event, direction, senderId, chatId) {
   const supabaseUrl = process.env.RELAY_SUPABASE_URL;
   const supabaseKey = process.env.RELAY_SUPABASE_SERVICE_ROLE_KEY;
   if (!supabaseUrl || !supabaseKey || !event) return true; // no-op if unconfigured
@@ -313,7 +314,7 @@ async function persistMessageAsync(channelId, event, direction, senderId) {
   const eventType = event.type || '';
   if (!MESSAGE_TYPES_TO_PERSIST.has(eventType)) return true;
 
-  const row = buildPersistRow(channelId, event, direction, senderId);
+  const row = buildPersistRow(channelId, event, direction, senderId, chatId);
 
   for (let attempt = 0; attempt <= PERSIST_MAX_RETRIES; attempt++) {
     try {
@@ -423,7 +424,7 @@ async function drainOutboundPersistQueue() {
     while (outboundPersistQueue.length > 0) {
       const job = outboundPersistQueue.shift();
       try {
-        const ok = await persistMessageAsync(job.channelId, job.event, 'outbound', job.senderId);
+        const ok = await persistMessageAsync(job.channelId, job.event, 'outbound', job.senderId, job.chatId);
         if (!ok) outboundPersistMetrics.failed++;
         outboundPersistMetrics.drained++;
       } catch (err) {
@@ -435,8 +436,8 @@ async function drainOutboundPersistQueue() {
     outboundPersistWorking = false;
   }
 }
-function enqueueOutboundPersist(channelId, event, senderId) {
-  outboundPersistQueue.push({ channelId, event, senderId });
+function enqueueOutboundPersist(channelId, event, senderId, chatId) {
+  outboundPersistQueue.push({ channelId, event, senderId, chatId });
   outboundPersistMetrics.enqueued++;
   if (outboundPersistQueue.length > outboundPersistMetrics.queueHighWater) {
     outboundPersistMetrics.queueHighWater = outboundPersistQueue.length;
@@ -2269,7 +2270,7 @@ backendWss.on("connection", (ws) => {
           if (normalized) ensureThreadKnown(boundChannelId, normalized);
         }
 
-        enqueueOutboundPersist(boundChannelId, frame.event, real.userId);
+        enqueueOutboundPersist(boundChannelId, frame.event, real.userId, real.chatId);
         sendJson(real.ws, frame.event);
         if (real.chatId) {
           fanOut(boundChannelId, real.chatId, frame.event, frame.connectionId);
@@ -2299,7 +2300,7 @@ backendWss.on("connection", (ws) => {
           const req = sess.requests.get(replyTo);
           if (req) {
             if (apiEvent?.type === 'message.send') {
-              enqueueOutboundPersist(boundChannelId, apiEvent, sess.userId);
+              enqueueOutboundPersist(boundChannelId, apiEvent, sess.userId, sess.chatId);
               if (sess.chatId) {
                 fanOut(boundChannelId, sess.chatId, apiEvent, frame.connectionId);
               }
@@ -2329,7 +2330,7 @@ backendWss.on("connection", (ws) => {
             console.warn(`[router] dropping ${apiEvent?.type} replyTo=${replyTo} — no owner sink in session ${sess.sessionId}`);
             // Still let WS siblings see message.send so cross-device stays consistent.
             if (apiEvent?.type === 'message.send') {
-              enqueueOutboundPersist(boundChannelId, apiEvent, sess.userId);
+              enqueueOutboundPersist(boundChannelId, apiEvent, sess.userId, sess.chatId);
               if (sess.chatId) {
                 fanOut(boundChannelId, sess.chatId, apiEvent, frame.connectionId);
               }
@@ -2342,7 +2343,7 @@ backendWss.on("connection", (ws) => {
           // no inbound origin). Persist + fan out to WS siblings only — DO
           // NOT push to sess.requests streamSinks; that path was the source
           // of the privacy leak between concurrent HTTP/SSE callers.
-          enqueueOutboundPersist(boundChannelId, apiEvent, sess.userId);
+          enqueueOutboundPersist(boundChannelId, apiEvent, sess.userId, sess.chatId);
           if (sess.chatId) {
             fanOut(boundChannelId, sess.chatId, apiEvent, frame.connectionId);
           }
@@ -2362,13 +2363,13 @@ backendWss.on("connection", (ws) => {
       }
 
       // No live destination — persist for reconnect sync (lastSeen replay path).
-      enqueueOutboundPersist(boundChannelId, frame.event, null);
+      enqueueOutboundPersist(boundChannelId, frame.event, null, null);
       return;
     }
 
     if (frame?.type === "relay.server.persist") {
       console.log(`[relay] ← backend ${boundChannelId} persist-only: ${frame.event?.type || 'unknown'}`);
-      enqueueOutboundPersist(boundChannelId, frame.event, frame.senderId || null);
+      enqueueOutboundPersist(boundChannelId, frame.event, frame.senderId || null, frame.chatId || null);
       return;
     }
 
@@ -2489,6 +2490,7 @@ async function resendOutboundSinceLastSeen(channelId, chatId, lastSeenMessageId,
 
   const rowsRes = await fetch(
     `${supabaseUrl}/pg/rest/v1/cl_messages?channel_id=eq.${encodeURIComponent(channelId)}` +
+      (chatId ? `&chat_id=eq.${encodeURIComponent(chatId)}` : '') +
       `&direction=eq.outbound` +
       `&timestamp=gt.${encodeURIComponent(anchorTs)}` +
       `&select=message_id,sender_id,agent_id,content,content_type,thread_id,parent_id,timestamp,meta` +
@@ -2681,8 +2683,9 @@ clientWss.on("connection", (ws, request) => {
     // the client can retry — never silently forward an unpersisted message.
     if (event?.type === 'message.receive') {
       const senderId = authResult.authUser?.senderId;
+      const real = realClients.get(connectionId);
       const inboundPersisted = await persistMessageAsync(
-        channelId, event, 'inbound', senderId
+        channelId, event, 'inbound', senderId, real?.chatId
       );
       if (!inboundPersisted) {
         sendJson(ws, {
@@ -2691,7 +2694,6 @@ clientWss.on("connection", (ws, request) => {
         });
         return;
       }
-      const real = realClients.get(connectionId);
       if (real?.chatId) {
         fanOut(
           channelId, real.chatId,
@@ -3089,12 +3091,14 @@ server.on("request", async (request, response) => {
     }
     try {
       const channelId = url.searchParams.get('channelId') || '';
+      const chatId = url.searchParams.get('chatId') || '';
       const direction = url.searchParams.get('direction') || '';
       const limit = Math.min(Number(url.searchParams.get('limit')) || 50, 200);
       const offset = Number(url.searchParams.get('offset')) || 0;
 
-      let filter = `select=id,channel_id,sender_id,agent_id,message_id,content,content_type,direction,media_url,meta,timestamp,created_at&order=timestamp.desc&limit=${limit}&offset=${offset}`;
+      let filter = `select=id,channel_id,chat_id,sender_id,agent_id,message_id,content,content_type,direction,media_url,meta,timestamp,created_at&order=timestamp.desc&limit=${limit}&offset=${offset}`;
       if (channelId) filter += `&channel_id=eq.${encodeURIComponent(channelId)}`;
+      if (chatId) filter += `&chat_id=eq.${encodeURIComponent(chatId)}`;
       if (direction === 'inbound' || direction === 'outbound') filter += `&direction=eq.${direction}`;
 
       const res = await fetch(`${supabaseUrl}/pg/rest/v1/cl_messages?${filter}`, {
@@ -3188,6 +3192,7 @@ server.on("request", async (request, response) => {
     }
     try {
       const channelId = url.searchParams.get('channelId') || '';
+      const chatId = url.searchParams.get('chatId') || '';
       const after = Number(url.searchParams.get('after')) || 0;
       const before = Number(url.searchParams.get('before')) || 0;
       const agentId = url.searchParams.get('agentId') || '';
@@ -3203,6 +3208,10 @@ server.on("request", async (request, response) => {
         writeJson(response, 400, { ok: false, error: 'invalid channelId' });
         return;
       }
+      if (chatId && !SAFE_ID_RE.test(chatId)) {
+        writeJson(response, 400, { ok: false, error: 'invalid chatId' });
+        return;
+      }
       if (agentId && !SAFE_ID_RE.test(agentId)) {
         writeJson(response, 400, { ok: false, error: 'invalid agentId' });
         return;
@@ -3212,9 +3221,10 @@ server.on("request", async (request, response) => {
       // When 'before' is provided, fetch newest messages before that timestamp (desc order).
       // When 'after' is provided, fetch oldest messages after that timestamp (asc order).
       const isPagingBack = before > 0 && !after;
-      let filter = `select=id,channel_id,sender_id,agent_id,message_id,content,content_type,direction,media_url,thread_id,meta,timestamp`;
+      let filter = `select=id,channel_id,chat_id,sender_id,agent_id,message_id,content,content_type,direction,media_url,thread_id,meta,timestamp`;
       filter += `&order=timestamp.${isPagingBack ? 'desc' : 'asc'}&limit=${limit}`;
       filter += `&channel_id=eq.${encodeURIComponent(channelId)}`;
+      if (chatId) filter += `&chat_id=eq.${encodeURIComponent(chatId)}`;
       if (after > 0) filter += `&timestamp=gt.${after}`;
       if (before > 0) filter += `&timestamp=lt.${before}`;
       if (agentId) filter += `&agent_id=eq.${encodeURIComponent(agentId)}`;
@@ -3512,7 +3522,7 @@ server.on("request", async (request, response) => {
       // agent later acks/errors/times out. DB write failure → 500 (do not
       // silently swallow; the caller must know).
       const inboundPersisted = await persistMessageAsync(
-        channelId, inboundEvent, 'inbound', senderId
+        channelId, inboundEvent, 'inbound', senderId, chatId
       );
       if (!inboundPersisted) {
         releaseClaimOnError();

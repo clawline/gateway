@@ -50,6 +50,7 @@ execute function public.cl_set_updated_at();
 create table if not exists public.cl_messages (
   id uuid primary key default gen_random_uuid(),
   channel_id text not null,
+  chat_id text,
   sender_id text,
   agent_id text,
   message_id text,
@@ -66,6 +67,9 @@ create table if not exists public.cl_messages (
 
 create index if not exists cl_messages_channel_ts_idx
   on public.cl_messages (channel_id, timestamp desc);
+
+create index if not exists cl_messages_chat_ts_idx
+  on public.cl_messages (channel_id, chat_id, timestamp desc);
 
 create index if not exists cl_messages_sender_idx
   on public.cl_messages (channel_id, sender_id, timestamp desc);
