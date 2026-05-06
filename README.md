@@ -1,3 +1,5 @@
+> ⚠️ **DEPRECATED** — moved to https://github.com/clawline/platform/tree/main/apps/gateway on 2026-05-06
+
 # relay-gateway
 
 `relay-gateway` 是一个独立的 WebSocket 中转服务，同时也是一个简单的 relay 管理台。
